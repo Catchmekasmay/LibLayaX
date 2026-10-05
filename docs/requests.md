@@ -252,19 +252,21 @@ The model reads a limited number of tokens at a time. A token is a word or a pie
 word; English prose averages a little more than one token per word.
 
 For each question the model reads one sequence made of the question type, the instructions,
-the options and then the text. The limits of the published models are:
+the options and then the text. The limits are:
 
-| Limit | Value | Error when exceeded |
-|---|---|---|
-| The whole sequence: question plus text | 512 tokens (`max_len`) | `Question '…' exceeds state context limit (N tokens)` |
-| The question part: instructions plus all options | 192 tokens (`head_max_len`) | `… exceeds question head token budget (192 tokens)` or `… exceeds heading token budget (N tokens)` |
-| One option or level | 48 tokens | `… exceeds option token limit (48)` |
-| Options per question | 2 to 255 | `Questions require 2 through 255 options` |
+| Limit | English model | Multilingual model | Error when exceeded |
+|---|---|---|---|
+| The whole sequence: question plus text (`max_len`) | 512 tokens | 1024 tokens | `Question '…' exceeds state context limit (N tokens)` |
+| The question part: instructions plus all options (`head_max_len`) | 192 tokens | 256 tokens | `… exceeds question head token budget (N tokens)` or `… exceeds heading token budget (N tokens)` |
+| One option or level | 48 tokens | 48 tokens | `… exceeds option token limit (48)` |
+| Options per question | 2 to 255 | 2 to 255 | `Questions require 2 through 255 options` |
 
-`laya_info` reports `max_len` and `head_max_len` for the model that is loaded. In the first
-message, `N` is the number of tokens that were left for the text after the question, which
-is the practical limit for your text with that question: roughly 450 to 480 tokens with a
-short question, or about 350 English words.
+The first two limits come from the model's `rl_agent_config.json`, and `laya_info` reports
+them as `max_len` and `head_max_len` for the model that is loaded. The two models also count
+tokens differently, because each has its own tokenizer. In the first message, `N` is the
+number of tokens that were left for the text after the question, which is the practical
+limit for your text with that question: for the English model roughly 450 to 480 tokens with
+a short question, or about 350 English words.
 
 By default a request that is too long is refused, so you never get an answer about a text the
 model only partly read. There are two ways to handle longer texts:

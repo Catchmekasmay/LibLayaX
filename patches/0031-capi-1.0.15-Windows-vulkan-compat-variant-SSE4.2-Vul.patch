@@ -1,0 +1,105 @@
+From 4e7a058085b0c0aa953a9720c1ea52581da65dbc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 21:19:53 +0100
+Subject: [PATCH] capi 1.0.15: Windows vulkan-compat variant (SSE4.2 + Vulkan)
+
+A Windows x64 program under Wine on an Apple Silicon Mac runs through Rosetta, which offers
+no AVX, and reaches the Mac's GPU through Wine's Vulkan and MoltenVK. The vulkan variant
+requires AVX2 and refuses to load there; vulkan-compat builds the same two backends on the
+SSE4.2 baseline. The engine is unchanged from 1.0.14.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LAsYHSSgSysMFa8MKPJWgL
+---
+ capi/CMakeLists.txt                 |  2 +-
+ scripts/capi/build-arm64.sh         |  2 +-
+ scripts/capi/build-linux.sh         |  2 +-
+ scripts/capi/build-macos.sh         |  2 +-
+ scripts/capi/build-windows-mingw.sh | 11 ++++++++++-
+ 5 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/capi/CMakeLists.txt b/capi/CMakeLists.txt
+index 452a131..112e035 100644
+--- a/capi/CMakeLists.txt
++++ b/capi/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ # Flat C ABI shared library over laya.cpp: laya.dll (Windows), liblaya.so (Linux), liblaya.dylib (macOS).
+ # Enable from the top level with -DLAYA_C_API=ON. Build ggml statically (-DBUILD_SHARED_LIBS=OFF)
+ # to get a single self-contained library.
+-set(LAYA_C_VERSION "1.0.14" CACHE STRING "Version string reported by laya_version()")
++set(LAYA_C_VERSION "1.0.15" CACHE STRING "Version string reported by laya_version()")
+ 
+ add_library(laya_c SHARED laya_c.cpp)
+ target_include_directories(laya_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+diff --git a/scripts/capi/build-arm64.sh b/scripts/capi/build-arm64.sh
+index cd7275d..9740252 100755
+--- a/scripts/capi/build-arm64.sh
++++ b/scripts/capi/build-arm64.sh
+@@ -19,7 +19,7 @@ set -euo pipefail
+ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ WORK=${WORK:-$ROOT/build-deps}
+ JOBS=${JOBS:-$(nproc)}
+-VERSION=${LAYA_C_VERSION:-1.0.14}
++VERSION=${LAYA_C_VERSION:-1.0.15}
+ ICU_VERSION=${ICU_VERSION:-76-1}
+ ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
+ W=$ROOT/cmake/toolchains/zig
+diff --git a/scripts/capi/build-linux.sh b/scripts/capi/build-linux.sh
+index 49a7ade..ab23e37 100755
+--- a/scripts/capi/build-linux.sh
++++ b/scripts/capi/build-linux.sh
+@@ -21,7 +21,7 @@ ICU_VERSION=${ICU_VERSION:-76-1}
+ ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
+ JOBS=${JOBS:-$(nproc)}
+ VARIANTS=${VARIANTS:-"avx2 compat"}
+-VERSION=${LAYA_C_VERSION:-1.0.14}
++VERSION=${LAYA_C_VERSION:-1.0.15}
+ mkdir -p "$WORK" && cd "$WORK"
+ 
+ # 1. Static, position-independent ICU (the system one is a shared, version-specific library).
+diff --git a/scripts/capi/build-macos.sh b/scripts/capi/build-macos.sh
+index 061063b..f0b12ae 100755
+--- a/scripts/capi/build-macos.sh
++++ b/scripts/capi/build-macos.sh
+@@ -14,7 +14,7 @@ set -euo pipefail
+ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+ WORK=${WORK:-$ROOT/build-deps}
+ JOBS=${JOBS:-$(nproc)}
+-VERSION=${LAYA_C_VERSION:-1.0.14}
++VERSION=${LAYA_C_VERSION:-1.0.15}
+ ICU_VERSION=${ICU_VERSION:-76-1}
+ ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
+ if [ -z "${ZIG:-}" ]; then
+diff --git a/scripts/capi/build-windows-mingw.sh b/scripts/capi/build-windows-mingw.sh
+index 54c8efe..601c20a 100755
+--- a/scripts/capi/build-windows-mingw.sh
++++ b/scripts/capi/build-windows-mingw.sh
+@@ -44,8 +44,9 @@ fi
+ #           PCs without Vulkan. Needs VULKAN_HEADERS (Vulkan-Headers/include), SPIRV_HEADERS
+ #           (SPIRV-Headers/include), GLSLC (shaderc >= 2025.3) and VULKAN_DEF (a .def listing the
+ #           exports of vulkan-1.dll, e.g. generated from Wine's or the SDK's vulkan-1.dll).
++#   vulkan-compat  cpu (SSE4.2) + vulkan backends; same requirements as vulkan.
+ I=$WORK/icu-win
+-VERSION=${LAYA_C_VERSION:-1.0.14}
++VERSION=${LAYA_C_VERSION:-1.0.15}
+ for variant in ${VARIANTS:-avx2 compat}; do
+   cxxflags="-DU_STATIC_IMPLEMENTATION"
+   case $variant in
+@@ -57,6 +58,14 @@ for variant in ${VARIANTS:-avx2 compat}; do
+             isa=(-DLAYA_VULKAN=ON -DVulkan_INCLUDE_DIR="${VULKAN_HEADERS:?set VULKAN_HEADERS}"
+                  -DVulkan_LIBRARY="$WORK/vk-mingw/libvulkan-1-delay.a" -DVulkan_GLSLC_EXECUTABLE="${GLSLC:-glslc}"
+                  -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON) ;;
++    vulkan-compat) # the same two backends on the SSE4.2 baseline: for x64 programs under an
++            # emulator that offers no AVX (Rosetta, Windows on ARM) but passes Vulkan through
++            mkdir -p "$WORK/vk-mingw"
++            x86_64-w64-mingw32-dlltool -d "${VULKAN_DEF:?set VULKAN_DEF}" -y "$WORK/vk-mingw/libvulkan-1-delay.a" -D vulkan-1.dll
++            cxxflags="$cxxflags -I${SPIRV_HEADERS:?set SPIRV_HEADERS}"
++            isa=(-DLAYA_VULKAN=ON -DVulkan_INCLUDE_DIR="${VULKAN_HEADERS:?set VULKAN_HEADERS}"
++                 -DVulkan_LIBRARY="$WORK/vk-mingw/libvulkan-1-delay.a" -DVulkan_GLSLC_EXECUTABLE="${GLSLC:-glslc}"
++                 -DGGML_SSE42=ON -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF) ;;
+     *) echo "unknown variant $variant" >&2; exit 1 ;;
+   esac
+   B=$ROOT/build-win-$variant
+-- 
+2.43.0
+

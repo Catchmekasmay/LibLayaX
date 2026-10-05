@@ -14,6 +14,7 @@ architecture, whatever the machine is.
 | Windows x64, processor with AVX2 | `laya-windows-…-avx2` | CPU |
 | Windows x64, any processor | `laya-windows-…-compat-sse42` | CPU |
 | Windows x64 with a GPU | `laya-windows-…-vulkan` | CPU and GPU |
+| Windows x64 with a GPU, any processor | `laya-windows-…-vulkan-compat-sse42` | CPU and GPU |
 | Windows ARM64 (native ARM64 program) | `laya-windows-arm64-…` | CPU |
 | Linux x86-64 | `laya-linux-…`, folder `avx2`, `compat-sse42` or `vulkan` | CPU; CPU and GPU in `vulkan` |
 | Linux ARM64 | `laya-linux-arm64-…` | CPU |
@@ -31,6 +32,16 @@ crash.
 or Rosetta on a Mac) must use a `compat-sse42` library, because the emulators do not provide
 AVX. This includes Delphi Win64 applications on Windows on ARM: they are x64 programs and
 cannot load the ARM64 library.
+
+**The GPU from an emulated x64 program.** The `vulkan` package needs AVX2 like the `avx2`
+one, so it does not load under an emulator. `vulkan-compat-sse42` is the same library with
+both backends on the SSE4.2 baseline, for an x64 program under an emulator that passes
+Vulkan through to a GPU. On the GPU the processor baseline matters little, because the GPU
+does the work.
+
+It was made for Windows programs run with Wine on an Apple Silicon Mac, where Rosetta offers
+no AVX, and it has run there on the GPU (see [What has been tested](#what-has-been-tested-and-what-has-not)). Its CPU backend has
+also run under Windows on ARM. A native macOS program can use the macOS GPU package instead.
 
 **The `vulkan` packages** contain the CPU backend too, and they load on machines without a
 GPU. They are larger (the Windows DLL is about 75 MB against 35 MB). Ship one of them if you
@@ -130,7 +141,7 @@ only needs a path to a folder with the five model files
 
 ## What has been tested, and what has not
 
-Every platform is delivered as version 1.0.14. This table lists what has actually run on real
+Every platform is delivered as version 1.0.15. This table lists what has actually run on real
 hardware, with the real English model.
 
 | Build | Version that ran | Machine |
@@ -140,6 +151,9 @@ hardware, with the real English model.
 | Windows x64 `vulkan` package, on the CPU and on the GPU (full precision) | 1.0.14 | Intel Core Ultra 9 275HX with NVIDIA RTX 5080 Laptop GPU (through the Lua binding's test suite, and through the Delphi binding's test program built with Delphi 10.2) |
 | Windows x64 `vulkan` package, on the CPU and on the GPU (full precision) | 1.0.14 | AMD Ryzen 5 5500 with NVIDIA GeForce RTX 3050 (through the Rust binding's tests) |
 | Windows x64 `compat-sse42` | 1.0.14 | Windows 11 on ARM, x64 emulation (Parallels), through the Lua and Rust bindings' tests |
+| Windows x64 `vulkan-compat-sse42`, on the CPU | 1.0.15 | Windows 11 on ARM, x64 emulation (Parallels on Apple M3 Ultra), from a Delphi Win64 program |
+| Windows x64 `vulkan-compat-sse42`, on the GPU (`fp32` and `fp16`) | 1.0.15 (a diagnostic build with the queue fix) | Wine on macOS with Rosetta (MoltenVK 1.4.1), Apple M3 Ultra, with a test program and an English fine-tuned model: the same answers as on the CPU |
+| Windows x64, multilingual model, on the CPU | 1.0.14 | Through the Delphi binding's tests: the model loads, answers, and prepares requests as expected |
 | Windows ARM64 | 1.0.14 | Windows 11 on ARM (Parallels on Apple M3 Ultra) |
 | Linux x86-64 `compat-sse42` | 1.0.14 | Ubuntu 26.04 LTS (VMware virtual machine on an AMD Ryzen 5 5500), through the Rust binding's tests |
 | Linux x86-64 `vulkan`, on its CPU backend | 1.0.14 | Ubuntu 24.04.5 LTS under WSL on Windows, AMD Ryzen 5 5500, through the Rust binding's tests |
@@ -159,11 +173,17 @@ Not run anywhere yet:
   and the CPU backend worked;
 * AMD and Intel GPUs on any system (the GPUs that have run are NVIDIA and Apple ones);
 * a build with Visual C++, and the CUDA backend;
-* the `multilingual` and `typed-decisions` models.
+* the `typed-decisions` model, and the `multilingual` model on a GPU.
 
 Between 1.0.9 and 1.0.14 nothing changed in the engine for the platforms that were tested at
 an older version; those versions added the Windows ARM64 fix, the debug trace and
-`laya-probe` ([History](history.md)). The cross-built binaries were also run before delivery
+`laya-probe` ([History](history.md)). 1.0.15 adds the `vulkan-compat-sse42` package and changes two
+things in the GPU backend: how the Vulkan queue is fetched, and where large full-precision
+passes are split. It also adds `.tar` models and `laya_set_codec` to every library, for which
+all model files are now read through one new layer ([History](history.md),
+[Model files](model-files.md)). The arithmetic of the CPU backend is unchanged, and the Linux
+and Windows x86-64 libraries give the answers of 1.0.14 with a test model. Of the tests above,
+only the `vulkan-compat-sse42` ones were run at 1.0.15. The cross-built binaries were also run before delivery
 under Wine (Windows x64), QEMU (Linux ARM64) and ARM64 Wine under QEMU (Windows ARM64). macOS
 binaries cannot be run on the Linux build machine at all.
 

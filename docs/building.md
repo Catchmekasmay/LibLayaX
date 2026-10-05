@@ -38,6 +38,7 @@ Common needs: `cmake ninja-build g++ nlohmann-json3-dev curl`.
 |---|---|---|
 | Windows x64, CPU (`avx2` and `compat`) | `scripts/capi/build-windows-mingw.sh` | `mingw-w64` |
 | Windows x64, with GPU | `VARIANTS=vulkan VULKAN_HEADERS=… SPIRV_HEADERS=… GLSLC=… VULKAN_DEF=… scripts/capi/build-windows-mingw.sh` | Vulkan-Headers, SPIRV-Headers, shaderc 2025.3 or later |
+| Windows x64, with GPU, SSE4.2 baseline | the same with `VARIANTS=vulkan-compat` | the same |
 | Windows ARM64 | `LLVM_MINGW=/path/to/llvm-mingw scripts/capi/build-arm64.sh windows` | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) |
 | Linux x86-64, CPU (`avx2` and `compat`) | `scripts/capi/build-linux.sh` | none |
 | Linux x86-64, with GPU | `VARIANTS=vulkan VULKAN_HEADERS=… EXTRA_CMAKE_ARGS="-DVulkan_GLSLC_EXECUTABLE=…" scripts/capi/build-linux.sh` | as for Windows with GPU |
@@ -75,8 +76,9 @@ cmake --build build --target laya_c
 
 ## Processor baselines
 
-The x86-64 library is built twice. The baseline is fixed at build time; the library does not
-switch at run time.
+The x86-64 library is built for two baselines. The baseline is fixed at build time; the
+library does not switch at run time. The GPU builds use `avx2`; on Windows there is also
+`vulkan-compat`, the GPU build on the `compat` baseline.
 
 | Variant | Instructions used | CMake settings |
 |---|---|---|
@@ -112,7 +114,7 @@ With Visual Studio's tools the same is `lib /def:laya.def /machine:x64 /out:laya
 | `capi/laya_c.cpp` | The implementation: error handling, floating-point guard, processor check, crash reporter, debug trace. |
 | `capi/CMakeLists.txt` | The `laya_c` target and the tools; enabled with `-DLAYA_C_API=ON`. |
 | `capi/vulkan_lazy.c` | Linux: opens the Vulkan loader on first use, so the library loads on machines without Vulkan. |
-| `capi/linux-exports.map`, `capi/macos-exports.txt`, `capi/laya.def` | Export lists: only the ten `laya_` functions are visible from outside. |
+| `capi/linux-exports.map`, `capi/macos-exports.txt`, `capi/laya.def` | Export lists: only the eleven `laya_` functions are visible from outside. |
 | `capi/patches/ggml-trace.diff` | Optional patch for ggml that extends the debug trace into the start-up of the CPU engine. |
 | `tests/capi/test_capi.c` | The test suite (`test-capi`). |
 | `tests/capi/bench_capi.c` | `laya-bench`: load time, speed, and whether a backend gives the reference answers. |

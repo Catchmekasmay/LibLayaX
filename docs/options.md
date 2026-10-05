@@ -33,7 +33,7 @@ another.
 | `"cuda"` | NVIDIA GPUs through CUDA. | No released package. The code is there for a build from source, which has not been tried. |
 
 A library only has the backends that were compiled into it. `laya_version()` lists them, for
-example `laya_c 1.0.14 (api 1; backends: cpu,vulkan)`. Asking for one that is missing fails
+example `laya_c 1.0.15 (api 1; backends: cpu,vulkan)`. Asking for one that is missing fails
 with `This build has no Vulkan backend`.
 
 A `vulkan` package also works as a CPU library: it opens the system's Vulkan loader only
@@ -65,7 +65,8 @@ runs its probabilities stayed within about 0.003 of the CPU's:
 
 On macOS, prefer `bf16` or `fp16` for a second reason: with `fp32` the library has to split
 large batches to work around a fault in the Vulkan layer there (see
-[Troubleshooting](troubleshooting.md#known-problems)).
+[Troubleshooting](troubleshooting.md#known-problems)). The same holds for the Windows library
+under Wine on a Mac, which reaches the same Vulkan layer.
 
 Combinations that are refused:
 
@@ -128,7 +129,9 @@ laya_create("/models/laya", "{\"variant\":\"multilingual\"}");
 `"english"` leaves the folder as it is. The other two add their name to the path, unless the
 folder you gave is already a model folder and has no subfolder of that name.
 
-Only the English model has been run through LibLayaX so far.
+The English and the multilingual model have been run through LibLayaX; `typed-decisions`
+has not. The models differ in how much text they take: see
+[Size limits](requests.md#size-limits).
 
 ## allow_truncation
 

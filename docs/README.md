@@ -15,7 +15,7 @@ it exists.
 
 | Page | Content |
 |---|---|
-| [The API](api.md) | The ten functions, one by one: arguments, results, who frees what, threads, errors, logging. |
+| [The API](api.md) | The eleven functions, one by one: arguments, results, who frees what, threads, errors, logging. |
 | [Options](options.md) | What can be passed to `laya_create`: CPU or GPU, precision, threads, which GPU, which model variant. |
 | [Platforms and packages](platforms.md) | Which library file goes with which system, how to ship it with an application, what each one needs, what has been tested. |
 | [Language bindings](bindings.md) | The ready-made bindings (Delphi, Rust, Lua) and how to call the library from any other language, with a Python example. |
@@ -27,6 +27,7 @@ it exists.
 | [Troubleshooting](troubleshooting.md) | Error messages and what they mean, the debug trace, crash reports, known problems. |
 | [Testing](testing.md) | The test and benchmark tools that come in every package. |
 | [Building from source](building.md) | Building the library for each platform, and what LibLayaX adds to laya.cpp. |
+| [Model files](model-files.md) | A model as a folder or as one `.tar` file, and codecs for the weights. |
 | [History](history.md) | What changed in each version. |
 
 ## The short version

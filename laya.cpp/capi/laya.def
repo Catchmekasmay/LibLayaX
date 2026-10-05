@@ -12,5 +12,6 @@ EXPORTS
     laya_last_error
     laya_predict
     laya_prepare
+    laya_set_codec
     laya_set_log_callback
     laya_version

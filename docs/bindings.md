@@ -1,7 +1,7 @@
 # Language bindings
 
 The library has a C interface, and almost every programming language can call C. A binding
-is the small piece of code that does that for one language: it declares the ten functions and
+is the small piece of code that does that for one language: it declares the functions and
 usually adds a convenient type on top.
 
 ## Ready-made bindings

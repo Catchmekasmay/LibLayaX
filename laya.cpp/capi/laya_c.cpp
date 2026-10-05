@@ -2,6 +2,7 @@
 #define LAYA_C_BUILD
 #include "laya_c.h"
 #include "laya/runtime.hpp"
+#include "laya/model_files.hpp"
 #include "ggml.h"
 
 #include <algorithm>
@@ -378,6 +379,34 @@ LAYA_API void LAYA_CALL laya_set_log_callback(laya_log_fn fn, void* user, int mi
     log_min = fn ? min_level : int(GGML_LOG_LEVEL_WARN);
 }
 
+namespace {
+// The codec registered with laya_set_codec, and the one in use by the load in progress.
+std::mutex codec_lock;
+laya_codec_fn registered_codec = nullptr;
+void* registered_codec_user = nullptr;
+laya_codec_fn active_codec = nullptr;
+void* active_codec_user = nullptr;
+// The engine's codec type has no calling convention of its own; this adapts it to LAYA_CALL.
+int codec_adapter(void*, const char* path, const char* file_name, uint64_t offset, void* data, uint64_t size) {
+    return active_codec(active_codec_user, path, file_name, offset, data, size);
+}
+// Ends the special reading of model files when a load is over, however it ends.
+struct sources_guard {
+    ~sources_guard() {
+        laya::model_files::unmount_archive();
+        laya::model_files::set_codec(nullptr, nullptr);
+        active_codec = nullptr;
+        active_codec_user = nullptr;
+    }
+};
+}  // namespace
+
+LAYA_API void LAYA_CALL laya_set_codec(laya_codec_fn fn, void* user) {
+    std::lock_guard<std::mutex> guard(codec_lock);
+    registered_codec = fn;
+    registered_codec_user = fn ? user : nullptr;
+}
+
 LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* options_json) {
     debug("create: enter", debug_enabled() ? fp_registers().c_str() : nullptr);
     call_guard fp;
@@ -433,12 +462,33 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
         // Same resolution as laya-cli: a store root plus a variant selects <root>/<variant>,
         // except "english", which lives at the root. A checkpoint directory is used as given.
         auto directory = utf8_path(model_dir);
+        static std::mutex create_lock;  // set_cpu_threads and the model sources are process-wide; keep creation atomic
+        std::lock_guard<std::mutex> guard(create_lock);
+        // A model path that names a file is a .tar archive of the model; a codec set with
+        // laya_set_codec decodes the weights of this load.
+        sources_guard sources;
+        {
+            std::error_code ignored;
+            if (std::filesystem::is_regular_file(directory, ignored)) {
+                debug("create: the model is an archive", path_utf8(directory).c_str());
+                laya::model_files::mount_archive(directory);
+            }
+            {
+                std::lock_guard<std::mutex> codec_guard(codec_lock);
+                active_codec = registered_codec;
+                active_codec_user = registered_codec_user;
+            }
+            if (active_codec) {
+                debug("create: a codec decodes the weights");
+                laya::model_files::set_codec(codec_adapter, nullptr);
+            }
+        }
         std::string variant = options.value("variant", "");
         if (!variant.empty() && variant != "english" && variant != "multilingual" && variant != "typed-decisions")
             throw std::invalid_argument("Unknown model variant: " + variant);
         if (!variant.empty() && variant != "english" &&
-            (std::filesystem::exists(directory / variant / "rl_agent_config.json") ||
-             !std::filesystem::exists(directory / "rl_agent_config.json")))
+            (laya::model_files::exists(directory / variant / "rl_agent_config.json") ||
+             !laya::model_files::exists(directory / "rl_agent_config.json")))
             directory /= variant;
 
         std::string device;
@@ -458,8 +508,6 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
         if (const auto missing = missing_cpu_features(); !missing.empty())
             throw std::runtime_error("This laya build needs CPU instructions your processor (or virtual machine) "
                                      "does not provide: " + missing + ". Use a build for an older CPU baseline.");
-        static std::mutex create_lock;  // set_cpu_threads is process-wide; keep creation atomic
-        std::lock_guard<std::mutex> guard(create_lock);
         debug("create: loading model", path_utf8(directory).c_str());
         laya::set_cpu_threads(threads ? threads : int(std::max(1u, std::thread::hardware_concurrency())));
         laya::set_gpu_device(device);
@@ -469,8 +517,10 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
         laya::set_gpu_device("");
         debug("create: model loaded");
 
-        std::ifstream config_file(directory / "rl_agent_config.json");
-        const auto config = laya::json::parse(config_file, nullptr, false);
+        laya::json config(laya::json::value_t::discarded);
+        try {
+            config = laya::json::parse(laya::model_files::read_text(directory / "rl_agent_config.json"), nullptr, false);
+        } catch (const std::exception&) {}
         if (!config.is_discarded()) {
             agent->model_name = config.value("model_name", "");
             agent->max_len = config.value("max_len", 512);

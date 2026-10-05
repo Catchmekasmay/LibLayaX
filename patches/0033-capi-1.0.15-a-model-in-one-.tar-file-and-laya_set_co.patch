@@ -1,0 +1,1060 @@
+From 7a8bccb5bc4038ea390be2858a478d4ad0a13117 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 00:54:09 +0100
+Subject: [PATCH] capi 1.0.15: a model in one .tar file, and laya_set_codec for
+ the weights
+
+All model files are read through laya::model_files. A model path that names a file is mounted
+as an uncompressed tar archive in place of the model folder, and a codec set with the new
+laya_set_codec decodes the bytes of the weight file while it is read, from a folder or from an
+archive. Both are in every build; the API version stays 1 (an eleventh function, nothing
+changed in the other ten). tests/capi/test_sources.c and test_sources.py test both.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LAsYHSSgSysMFa8MKPJWgL
+---
+ CMakeLists.txt                      |   2 +-
+ capi/CMakeLists.txt                 |   7 +
+ capi/laya.def                       |   1 +
+ capi/laya_c.cpp                     |  62 ++++++-
+ capi/laya_c.h                       |  30 +++
+ capi/linux-exports.map              |   2 +-
+ capi/macos-exports.txt              |   1 +
+ include/laya/model_files.hpp        |  63 +++++++
+ scripts/capi/build-arm64.sh         |   2 +-
+ scripts/capi/build-linux.sh         |   2 +-
+ scripts/capi/build-macos.sh         |   2 +-
+ scripts/capi/build-windows-mingw.sh |   2 +-
+ src/model_files.cpp                 | 279 ++++++++++++++++++++++++++++
+ src/protocol.cpp                    |   3 +-
+ src/runtime.cpp                     |  23 ++-
+ src/tokenizer.cpp                   |   5 +-
+ tests/capi/test_sources.c           | 118 ++++++++++++
+ tests/capi/test_sources.py          | 163 ++++++++++++++++
+ 18 files changed, 739 insertions(+), 28 deletions(-)
+ create mode 100644 include/laya/model_files.hpp
+ create mode 100644 src/model_files.cpp
+ create mode 100644 tests/capi/test_sources.c
+ create mode 100644 tests/capi/test_sources.py
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 05035ca..f7f9eb1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -127,7 +127,7 @@ if(LAYA_PORTABLE)
+   endforeach()
+   add_compile_definitions(U_STATIC_IMPLEMENTATION)
+ endif()
+-add_library(laya src/decision.cpp src/precision.cpp src/tokenizer.cpp src/runtime.cpp src/protocol.cpp)
++add_library(laya src/decision.cpp src/precision.cpp src/tokenizer.cpp src/runtime.cpp src/protocol.cpp src/model_files.cpp)
+ target_include_directories(laya PUBLIC include)
+ target_compile_features(laya PUBLIC cxx_std_20)
+ target_compile_options(laya PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4> $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>)
+diff --git a/capi/CMakeLists.txt b/capi/CMakeLists.txt
+index 112e035..49c5bc8 100644
+--- a/capi/CMakeLists.txt
++++ b/capi/CMakeLists.txt
+@@ -77,6 +77,13 @@ if(BUILD_TESTING)
+     set_target_properties(laya-bench PROPERTIES BUILD_RPATH "@executable_path")
+   endif()
+   # Stand-alone check of the C++ runtime features the library relies on (no laya.dll, no model).
++  # .tar models and weight codecs (see tests/capi/test_sources.c)
++  add_executable(test-sources ${CMAKE_SOURCE_DIR}/tests/capi/test_sources.c)
++  set_target_properties(test-sources PROPERTIES C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
++  target_link_libraries(test-sources PRIVATE laya_c)
++  if(LAYA_MINGW_GCC)
++    target_link_options(test-sources PRIVATE -static)
++  endif()
+   add_executable(laya-probe ${CMAKE_SOURCE_DIR}/tests/capi/probe.cpp)
+   set_target_properties(laya-probe PROPERTIES CXX_STANDARD 20 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+   if(LAYA_MINGW_GCC)
+diff --git a/capi/laya.def b/capi/laya.def
+index d0c67cd..e192194 100644
+--- a/capi/laya.def
++++ b/capi/laya.def
+@@ -12,5 +12,6 @@ EXPORTS
+     laya_last_error
+     laya_predict
+     laya_prepare
++    laya_set_codec
+     laya_set_log_callback
+     laya_version
+diff --git a/capi/laya_c.cpp b/capi/laya_c.cpp
+index 63b784b..2de39c6 100644
+--- a/capi/laya_c.cpp
++++ b/capi/laya_c.cpp
+@@ -2,6 +2,7 @@
+ #define LAYA_C_BUILD
+ #include "laya_c.h"
+ #include "laya/runtime.hpp"
++#include "laya/model_files.hpp"
+ #include "ggml.h"
+ 
+ #include <algorithm>
+@@ -378,6 +379,34 @@ LAYA_API void LAYA_CALL laya_set_log_callback(laya_log_fn fn, void* user, int mi
+     log_min = fn ? min_level : int(GGML_LOG_LEVEL_WARN);
+ }
+ 
++namespace {
++// The codec registered with laya_set_codec, and the one in use by the load in progress.
++std::mutex codec_lock;
++laya_codec_fn registered_codec = nullptr;
++void* registered_codec_user = nullptr;
++laya_codec_fn active_codec = nullptr;
++void* active_codec_user = nullptr;
++// The engine's codec type has no calling convention of its own; this adapts it to LAYA_CALL.
++int codec_adapter(void*, const char* path, const char* file_name, uint64_t offset, void* data, uint64_t size) {
++    return active_codec(active_codec_user, path, file_name, offset, data, size);
++}
++// Ends the special reading of model files when a load is over, however it ends.
++struct sources_guard {
++    ~sources_guard() {
++        laya::model_files::unmount_archive();
++        laya::model_files::set_codec(nullptr, nullptr);
++        active_codec = nullptr;
++        active_codec_user = nullptr;
++    }
++};
++}  // namespace
++
++LAYA_API void LAYA_CALL laya_set_codec(laya_codec_fn fn, void* user) {
++    std::lock_guard<std::mutex> guard(codec_lock);
++    registered_codec = fn;
++    registered_codec_user = fn ? user : nullptr;
++}
++
+ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* options_json) {
+     debug("create: enter", debug_enabled() ? fp_registers().c_str() : nullptr);
+     call_guard fp;
+@@ -433,12 +462,33 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
+         // Same resolution as laya-cli: a store root plus a variant selects <root>/<variant>,
+         // except "english", which lives at the root. A checkpoint directory is used as given.
+         auto directory = utf8_path(model_dir);
++        static std::mutex create_lock;  // set_cpu_threads and the model sources are process-wide; keep creation atomic
++        std::lock_guard<std::mutex> guard(create_lock);
++        // A model path that names a file is a .tar archive of the model; a codec set with
++        // laya_set_codec decodes the weights of this load.
++        sources_guard sources;
++        {
++            std::error_code ignored;
++            if (std::filesystem::is_regular_file(directory, ignored)) {
++                debug("create: the model is an archive", path_utf8(directory).c_str());
++                laya::model_files::mount_archive(directory);
++            }
++            {
++                std::lock_guard<std::mutex> codec_guard(codec_lock);
++                active_codec = registered_codec;
++                active_codec_user = registered_codec_user;
++            }
++            if (active_codec) {
++                debug("create: a codec decodes the weights");
++                laya::model_files::set_codec(codec_adapter, nullptr);
++            }
++        }
+         std::string variant = options.value("variant", "");
+         if (!variant.empty() && variant != "english" && variant != "multilingual" && variant != "typed-decisions")
+             throw std::invalid_argument("Unknown model variant: " + variant);
+         if (!variant.empty() && variant != "english" &&
+-            (std::filesystem::exists(directory / variant / "rl_agent_config.json") ||
+-             !std::filesystem::exists(directory / "rl_agent_config.json")))
++            (laya::model_files::exists(directory / variant / "rl_agent_config.json") ||
++             !laya::model_files::exists(directory / "rl_agent_config.json")))
+             directory /= variant;
+ 
+         std::string device;
+@@ -458,8 +508,6 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
+         if (const auto missing = missing_cpu_features(); !missing.empty())
+             throw std::runtime_error("This laya build needs CPU instructions your processor (or virtual machine) "
+                                      "does not provide: " + missing + ". Use a build for an older CPU baseline.");
+-        static std::mutex create_lock;  // set_cpu_threads is process-wide; keep creation atomic
+-        std::lock_guard<std::mutex> guard(create_lock);
+         debug("create: loading model", path_utf8(directory).c_str());
+         laya::set_cpu_threads(threads ? threads : int(std::max(1u, std::thread::hardware_concurrency())));
+         laya::set_gpu_device(device);
+@@ -469,8 +517,10 @@ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir, const char* op
+         laya::set_gpu_device("");
+         debug("create: model loaded");
+ 
+-        std::ifstream config_file(directory / "rl_agent_config.json");
+-        const auto config = laya::json::parse(config_file, nullptr, false);
++        laya::json config(laya::json::value_t::discarded);
++        try {
++            config = laya::json::parse(laya::model_files::read_text(directory / "rl_agent_config.json"), nullptr, false);
++        } catch (const std::exception&) {}
+         if (!config.is_discarded()) {
+             agent->model_name = config.value("model_name", "");
+             agent->max_len = config.value("max_len", 512);
+diff --git a/capi/laya_c.h b/capi/laya_c.h
+index 820066f..f47a14b 100644
+--- a/capi/laya_c.h
++++ b/capi/laya_c.h
+@@ -33,6 +33,8 @@ extern "C" {
+ 
+ #define LAYA_C_API_VERSION 1
+ 
++#include <stdint.h>
++
+ typedef struct laya_agent laya_agent;
+ 
+ /* Log levels match ggml: 1=debug 2=info 3=warn 4=error 5=continuation of previous line. */
+@@ -61,6 +63,10 @@ LAYA_API void LAYA_CALL laya_set_log_callback(laya_log_fn fn, void* user, int mi
+  *   "threads": int                       (CPU backend worker threads; default = all cores)
+  *   "device": int | "name part"          (Vulkan GPU: index, or part of its name such as "RTX";
+  *                                         default = first discrete GPU, else the first GPU)
++ * Since 1.0.15 model_dir may also name an uncompressed .tar archive of the model. Every file of
++ * the model is then read from the archive (rl_agent_config.json, encoder/config.json,
++ * model.safetensors and the two files in tokenizer/); the files may sit at the top of the
++ * archive or inside one folder, and "variant" works as with a folder.
+  * Returns NULL on failure; call laya_last_error() for the reason. */
+ LAYA_API laya_agent* LAYA_CALL laya_create(const char* model_dir_utf8, const char* options_json);
+ 
+@@ -88,6 +94,30 @@ LAYA_API void LAYA_CALL laya_destroy(laya_agent* agent);
+  * valid until the next laya_* call on the same thread. */
+ LAYA_API const char* LAYA_CALL laya_last_error(void);
+ 
++/* A codec for the weights (since 1.0.15; libraries before that do not export laya_set_codec).
++ *
++ * A codec is a function that decodes the stored bytes of the weight file (model.safetensors)
++ * while the library reads it, from a model folder or from a .tar archive. No other file is
++ * passed to it. It receives a block of the stored file and must replace it, in place, with the
++ * same block of the plain file:
++ *   user            the pointer given to laya_set_codec
++ *   path_utf8       the file on disk the block was read from, as a full UTF-8 path: the weight
++ *                   file itself for a model folder, the .tar file for a model in an archive. A
++ *                   codec that keeps a file of its own beside the model finds the folder from it.
++ *   file_name_utf8  the weight file's name without folders ("model.safetensors")
++ *   offset          position of data[0], counted from the start of the weight file (not of an
++ *                   archive around it)
++ *   data, size      the block; the decoded block has the same size
++ * Return 0 on success; any other value fails laya_create with that number in the message.
++ * The function is called on the thread that calls laya_create, several times per load, with
++ * blocks in any order.
++ *
++ * laya_set_codec(fn, user) sets the codec for every laya_create that follows, on any thread;
++ * fn = NULL removes it. Process-wide. */
++typedef int (LAYA_CALL *laya_codec_fn)(void* user, const char* path_utf8, const char* file_name_utf8,
++                                       uint64_t offset, void* data, uint64_t size);
++LAYA_API void LAYA_CALL laya_set_codec(laya_codec_fn fn, void* user);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/capi/linux-exports.map b/capi/linux-exports.map
+index d3fec21..69b7776 100644
+--- a/capi/linux-exports.map
++++ b/capi/linux-exports.map
+@@ -1,6 +1,6 @@
+ {
+   global:
+     laya_version; laya_api_version; laya_set_log_callback; laya_create; laya_predict;
+-    laya_prepare; laya_info; laya_free_string; laya_destroy; laya_last_error;
++    laya_prepare; laya_info; laya_free_string; laya_destroy; laya_last_error; laya_set_codec;
+   local: *;
+ };
+diff --git a/capi/macos-exports.txt b/capi/macos-exports.txt
+index 813bb73..2f780aa 100644
+--- a/capi/macos-exports.txt
++++ b/capi/macos-exports.txt
+@@ -8,3 +8,4 @@ _laya_info
+ _laya_free_string
+ _laya_destroy
+ _laya_last_error
++_laya_set_codec
+diff --git a/include/laya/model_files.hpp b/include/laya/model_files.hpp
+new file mode 100644
+index 0000000..6ff0900
+--- /dev/null
++++ b/include/laya/model_files.hpp
+@@ -0,0 +1,63 @@
++#pragma once
++#include <cstdint>
++#include <filesystem>
++#include <fstream>
++#include <string>
++
++// How the files of a model are read.
++//
++// By default a path names an ordinary file. While an archive is mounted, a path below the
++// archive's own path names an entry of that archive: with model.tar mounted, the path
++// model.tar/tokenizer/tokenizer.json is the entry tokenizer/tokenizer.json. The engine therefore
++// treats an archive as it treats a folder.
++//
++// A codec, when one is set, decodes the bytes of weight files (*.safetensors) after they are
++// read, whether the file is in a folder or in an archive. Other files are never passed to it.
++//
++// The mounted archive and the codec are process-wide and are meant to be set for the duration of
++// one model load, by a caller that serializes loads (the C API does).
++namespace laya {
++
++// Decodes `size` bytes in place. `path_utf8` is the file on disk the bytes were read from: the
++// weight file itself for a model folder, the archive for a model in an archive. `file_name_utf8`
++// is the weight file's name without folders. `offset` is the position of data[0] within the
++// weight file, counted from the start of that file (not of an archive around it). The decoded
++// data has the same length as the stored data. Returns 0 on success; any other value fails the
++// load.
++using weight_codec_fn = int (*)(void* user, const char* path_utf8, const char* file_name_utf8, uint64_t offset,
++                                void* data, uint64_t size);
++
++namespace model_files {
++
++// Reads the table of contents of an uncompressed tar archive and mounts it. Throws
++// std::runtime_error when the file is not such an archive.
++void mount_archive(const std::filesystem::path& archive);
++void unmount_archive();
++
++void set_codec(weight_codec_fn decode, void* user);  // nullptr removes it
++
++bool exists(const std::filesystem::path& path);
++
++// The whole file as text. Throws std::runtime_error when it cannot be read.
++std::string read_text(const std::filesystem::path& path);
++
++// A file read at arbitrary positions.
++class file {
++public:
++    explicit file(const std::filesystem::path& path);  // throws std::runtime_error when it cannot be opened
++    uint64_t size() const { return length; }
++    // Reads `size` bytes at `offset`. Returns false when the file is shorter than that or the
++    // read fails. Throws std::runtime_error when the codec reports an error.
++    bool read(uint64_t offset, void* data, uint64_t size);
++
++private:
++    std::ifstream stream;
++    std::string name;      // file name without folders, as given to the codec
++    std::string disk_path; // the file on disk that is read: the file itself, or the archive
++    uint64_t start = 0;    // where the file begins in the stream
++    uint64_t length = 0;
++    bool decode = false;
++};
++
++}  // namespace model_files
++}  // namespace laya
+diff --git a/scripts/capi/build-arm64.sh b/scripts/capi/build-arm64.sh
+index 9740252..d419265 100755
+--- a/scripts/capi/build-arm64.sh
++++ b/scripts/capi/build-arm64.sh
+@@ -66,7 +66,7 @@ for target in $TARGETS; do
+     -DICU_ROOT="$prefix" -DICU_INCLUDE_DIR="$prefix/include" -DICU_UC_LIBRARY_RELEASE="$prefix/lib/$uc" \
+     -DICU_I18N_LIBRARY_RELEASE="$prefix/lib/$in" -DICU_DATA_LIBRARY_RELEASE="$prefix/lib/$dt" \
+     -DCMAKE_CXX_FLAGS=-DU_STATIC_IMPLEMENTATION -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
+-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-cli laya-bench laya-diag laya-probe $tools
++  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-cli laya-bench laya-diag laya-probe $tools
+   if [ $target = windows ]; then  # import library for Visual C++ users
+     "$M/llvm-dlltool" -m arm64 -d "$ROOT/capi/laya.def" -D laya.dll -l "$B/bin/laya.lib"
+   fi
+diff --git a/scripts/capi/build-linux.sh b/scripts/capi/build-linux.sh
+index ab23e37..46416df 100755
+--- a/scripts/capi/build-linux.sh
++++ b/scripts/capi/build-linux.sh
+@@ -63,7 +63,7 @@ for variant in $VARIANTS; do
+     -DCMAKE_CXX_FLAGS="-DU_STATIC_IMPLEMENTATION" \
+     -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+     -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" ${EXTRA_CMAKE_ARGS:-}
+-  cmake --build "$ROOT/build-linux-$variant" --parallel "$JOBS" --target laya_c test-capi laya-cli laya-bench laya-diag laya-trace laya-probe
++  cmake --build "$ROOT/build-linux-$variant" --parallel "$JOBS" --target laya_c test-capi test-sources laya-cli laya-bench laya-diag laya-trace laya-probe
+   strip --strip-unneeded "$ROOT/build-linux-$variant/bin/liblaya.so"
+   echo "== $variant: $ROOT/build-linux-$variant/bin/liblaya.so"
+   readelf -d "$ROOT/build-linux-$variant/bin/liblaya.so" | grep NEEDED
+diff --git a/scripts/capi/build-macos.sh b/scripts/capi/build-macos.sh
+index f0b12ae..63c64fa 100755
+--- a/scripts/capi/build-macos.sh
++++ b/scripts/capi/build-macos.sh
+@@ -77,7 +77,7 @@ for variant in $VARIANTS; do
+     -DICU_ROOT="$I" -DICU_INCLUDE_DIR="$I/include" -DICU_UC_LIBRARY_RELEASE="$I/lib/libicuuc.a" \
+     -DICU_I18N_LIBRARY_RELEASE="$I/lib/libicui18n.a" -DICU_DATA_LIBRARY_RELEASE="$I/lib/libicudata.a" \
+     -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
+-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-bench laya-diag laya-trace laya-probe
++  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-bench laya-diag laya-trace laya-probe
+ 
+   # zig's Mach-O linker ignores -exported_symbols_list, so relink the dylib with LLVM's ld64.lld
+   # against the same libc++/compiler-rt that zig uses (found by letting zig link a probe).
+diff --git a/scripts/capi/build-windows-mingw.sh b/scripts/capi/build-windows-mingw.sh
+index 601c20a..fa323a9 100755
+--- a/scripts/capi/build-windows-mingw.sh
++++ b/scripts/capi/build-windows-mingw.sh
+@@ -76,7 +76,7 @@ for variant in ${VARIANTS:-avx2 compat}; do
+     -DICU_ROOT="$I" -DICU_INCLUDE_DIR="$I/include" -DICU_UC_LIBRARY_RELEASE="$I/lib/libsicuuc.a" \
+     -DICU_I18N_LIBRARY_RELEASE="$I/lib/libsicuin.a" -DICU_DATA_LIBRARY_RELEASE="$I/lib/libsicudt.a" \
+     "-DCMAKE_CXX_FLAGS=$cxxflags" -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
+-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-bench laya-diag laya-probe laya-cli
++  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-bench laya-diag laya-probe laya-cli
+   x86_64-w64-mingw32-strip --strip-unneeded "$B/bin/laya.dll"
+   # Import library for Visual C++ users (MinGW can link the DLL directly). llvm-dlltool writes
+   # the short import format link.exe expects; GNU dlltool's output also works with it.
+diff --git a/src/model_files.cpp b/src/model_files.cpp
+new file mode 100644
+index 0000000..464f06e
+--- /dev/null
++++ b/src/model_files.cpp
+@@ -0,0 +1,279 @@
++#include "laya/model_files.hpp"
++
++#include <algorithm>
++#include <cstring>
++#include <map>
++#include <stdexcept>
++#include <vector>
++
++namespace laya::model_files {
++namespace {
++
++struct entry {
++    uint64_t offset = 0;  // of the first data byte, within the archive
++    uint64_t size = 0;
++};
++
++struct archive_state {
++    bool mounted = false;
++    std::filesystem::path path;            // the archive file; also the virtual folder
++    std::string root;                      // "" or "folder/": where the model starts inside it
++    std::map<std::string, entry> entries;  // by name with '/' separators, without "./"
++};
++
++archive_state archive;
++weight_codec_fn codec = nullptr;
++void* codec_user = nullptr;
++
++std::string shown(const std::filesystem::path& path) {
++    const auto text = path.u8string();
++    return std::string(text.begin(), text.end());
++}
++
++// The full path of a file, for the codec; the path as given when it cannot be made absolute.
++std::string full_path(const std::filesystem::path& path) {
++    std::error_code failed;
++    const auto absolute = std::filesystem::absolute(path, failed);
++    return shown(failed ? path : absolute);
++}
++
++// ---- tar -----------------------------------------------------------------------------------
++
++constexpr uint64_t block = 512;
++
++uint64_t tar_number(const unsigned char* field, size_t width) {
++    if (field[0] & 0x80) {  // base-256, used by GNU tar for sizes of 8 GiB and more
++        uint64_t value = field[0] & 0x7f;
++        for (size_t i = 1; i < width; i++) value = (value << 8) | field[i];
++        return value;
++    }
++    uint64_t value = 0;
++    size_t i = 0;
++    while (i < width && field[i] == ' ') ++i;
++    for (; i < width && field[i] >= '0' && field[i] <= '7'; i++) value = value * 8 + uint64_t(field[i] - '0');
++    return value;
++}
++
++std::string tar_text(const unsigned char* field, size_t width) {
++    size_t length = 0;
++    while (length < width && field[length]) ++length;
++    return std::string(reinterpret_cast<const char*>(field), length);
++}
++
++bool tar_checksum_ok(const unsigned char* header) {
++    uint64_t sum = 0;
++    for (size_t i = 0; i < block; i++) sum += i >= 148 && i < 156 ? uint64_t(' ') : header[i];
++    return sum == tar_number(header + 148, 8);
++}
++
++// Forward slashes, no leading "./" or "/", no empty or "." parts. Empty when the name has a
++// ".." part or names nothing.
++std::string clean_name(const std::string& raw) {
++    std::string out, part;
++    auto flush = [&]() {
++        if (part.empty() || part == ".") { part.clear(); return true; }
++        if (part == "..") return false;
++        if (!out.empty()) out += '/';
++        out += part;
++        part.clear();
++        return true;
++    };
++    for (char ch : raw) {
++        if (ch == '/' || ch == '\\') { if (!flush()) return {}; }
++        else part += ch;
++    }
++    if (!flush()) return {};
++    return out;
++}
++
++std::string base_name(const std::string& name) {
++    const auto slash = name.find_last_of('/');
++    return slash == std::string::npos ? name : name.substr(slash + 1);
++}
++
++// The "path" and "size" records of a pax extended header ("<length> <key>=<value>\n" ...).
++void read_pax(const std::string& data, std::string& path, bool& has_size, uint64_t& size) {
++    size_t at = 0;
++    while (at < data.size()) {
++        const auto space = data.find(' ', at);
++        if (space == std::string::npos) break;
++        const uint64_t length = std::strtoull(data.substr(at, space - at).c_str(), nullptr, 10);
++        if (length == 0 || at + length > data.size()) break;
++        const std::string record = data.substr(space + 1, at + length - space - 1);  // "key=value\n"
++        const auto equals = record.find('=');
++        if (equals != std::string::npos) {
++            std::string value = record.substr(equals + 1);
++            if (!value.empty() && value.back() == '\n') value.pop_back();
++            const std::string key = record.substr(0, equals);
++            if (key == "path") path = value;
++            else if (key == "size") { size = std::strtoull(value.c_str(), nullptr, 10); has_size = true; }
++        }
++        at += length;
++    }
++}
++
++std::map<std::string, entry> read_index(const std::filesystem::path& path) {
++    std::ifstream stream(path, std::ios::binary | std::ios::ate);
++    if (!stream) throw std::runtime_error("Cannot open " + shown(path));
++    const uint64_t total = uint64_t(stream.tellg());
++    const std::string not_tar = shown(path) + " is not a folder and not an uncompressed tar archive";
++    if (total < block) throw std::runtime_error(not_tar);
++
++    std::map<std::string, entry> entries;
++    std::string long_name, pax_path;
++    bool pax_has_size = false;
++    uint64_t pax_size = 0, at = 0;
++    bool first = true;
++    unsigned char header[block];
++    while (at + block <= total) {
++        stream.seekg(std::streamoff(at));
++        stream.read(reinterpret_cast<char*>(header), block);
++        if (!stream) throw std::runtime_error("Cannot read " + shown(path));
++        if (std::all_of(header, header + block, [](unsigned char b) { return b == 0; })) break;  // end marker
++        if (!tar_checksum_ok(header)) {
++            if (first) throw std::runtime_error(not_tar);
++            throw std::runtime_error("Damaged tar archive (bad header at byte " + std::to_string(at) + "): " + shown(path));
++        }
++        first = false;
++        uint64_t size = tar_number(header + 124, 12);
++        const char type = char(header[156]);
++        const uint64_t data = at + block;
++        if (type == 'L' || type == 'x' || type == 'g' || type == 'K') {
++            // A record about the entry that follows: a GNU long name or a pax extended header.
++            if (size > 1024 * 1024 || data + size > total) throw std::runtime_error("Damaged tar archive: " + shown(path));
++            std::string text(size_t(size), '\0');
++            stream.read(text.data(), std::streamsize(size));
++            if (!stream) throw std::runtime_error("Cannot read " + shown(path));
++            if (type == 'L') long_name = text.c_str();
++            else if (type == 'x') read_pax(text, pax_path, pax_has_size, pax_size);
++        } else {
++            if (pax_has_size) size = pax_size;
++            std::string name = !pax_path.empty() ? pax_path : long_name;
++            if (name.empty()) {
++                name = tar_text(header, 100);
++                const bool posix = std::memcmp(header + 257, "ustar\0", 6) == 0;
++                const std::string prefix = posix ? tar_text(header + 345, 155) : std::string();
++                if (!prefix.empty()) name = prefix + "/" + name;
++            }
++            long_name.clear(); pax_path.clear(); pax_has_size = false;
++            if (data + size > total) throw std::runtime_error("Truncated tar archive: " + shown(path));
++            if (type == '0' || type == '\0' || type == '7') {
++                name = clean_name(name);
++                // "._name" entries are resource forks added by the macOS tar; they are not model files
++                if (!name.empty() && base_name(name).rfind("._", 0) != 0) entries[name] = entry{data, size};
++            }
++        }
++        at = data + (size + block - 1) / block * block;
++    }
++    if (first) throw std::runtime_error(not_tar);
++    return entries;
++}
++
++// A model packed together with its folder ("laya/rl_agent_config.json", ...) is found too: when
++// every entry lies below one top folder, that folder is where the model starts.
++std::string single_top_folder(const std::map<std::string, entry>& entries) {
++    std::string top;
++    for (const auto& [name, unused] : entries) {
++        (void)unused;
++        const auto slash = name.find('/');
++        if (slash == std::string::npos) return {};
++        const std::string folder = name.substr(0, slash + 1);
++        if (top.empty()) top = folder;
++        else if (top != folder) return {};
++    }
++    return top;
++}
++
++// The entry a path names, or nullptr when the path is not inside the mounted archive.
++// `inside` tells whether the path lies below the archive at all.
++const entry* find_entry(const std::filesystem::path& path, bool& inside) {
++    inside = false;
++    if (!archive.mounted) return nullptr;
++    const auto relative = path.lexically_relative(archive.path);
++    if (relative.empty()) return nullptr;
++    const auto first = relative.begin()->generic_u8string();
++    if (first == u8"." || first == u8"..") return nullptr;  // the archive itself, or a path elsewhere
++    inside = true;
++    const auto text = relative.generic_u8string();
++    const std::string name = clean_name(std::string(text.begin(), text.end()));
++    if (name.empty()) return nullptr;
++    const auto found = archive.entries.find(archive.root + name);
++    return found == archive.entries.end() ? nullptr : &found->second;
++}
++
++bool is_weight_file(const std::string& name) {
++    static const std::string suffix = ".safetensors";
++    return name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
++}
++
++}  // namespace
++
++void mount_archive(const std::filesystem::path& path) {
++    archive_state next;
++    next.entries = read_index(path);
++    next.root = single_top_folder(next.entries);
++    next.path = path;
++    next.mounted = true;
++    archive = std::move(next);
++}
++
++void unmount_archive() { archive = archive_state{}; }
++
++void set_codec(weight_codec_fn decode, void* user) {
++    codec = decode;
++    codec_user = decode ? user : nullptr;
++}
++
++bool exists(const std::filesystem::path& path) {
++    bool inside = false;
++    if (find_entry(path, inside)) return true;
++    if (inside) return false;
++    std::error_code ignored;
++    return std::filesystem::exists(path, ignored);
++}
++
++std::string read_text(const std::filesystem::path& path) {
++    file source(path);
++    if (source.size() > 1024ull * 1024 * 1024) throw std::runtime_error("File too large: " + shown(path));
++    std::string text(size_t(source.size()), '\0');
++    if (!source.read(0, text.data(), text.size())) throw std::runtime_error("Cannot read " + shown(path));
++    return text;
++}
++
++file::file(const std::filesystem::path& path) {
++    bool inside = false;
++    const entry* found = find_entry(path, inside);
++    const auto leaf = path.filename().u8string();
++    name.assign(leaf.begin(), leaf.end());
++    decode = is_weight_file(name);
++    if (found) {
++        stream.open(archive.path, std::ios::binary);
++        if (!stream) throw std::runtime_error("Cannot open " + shown(archive.path));
++        disk_path = full_path(archive.path);
++        start = found->offset;
++        length = found->size;
++        return;
++    }
++    if (inside) throw std::runtime_error("Cannot open " + shown(path) + " (no such file in the archive)");
++    stream.open(path, std::ios::binary | std::ios::ate);
++    if (!stream) throw std::runtime_error("Cannot open " + shown(path));
++    length = uint64_t(stream.tellg());
++    disk_path = full_path(path);
++}
++
++bool file::read(uint64_t offset, void* data, uint64_t size) {
++    if (offset > length || size > length - offset) return false;
++    if (size == 0) return true;
++    stream.clear();
++    stream.seekg(std::streamoff(start + offset));
++    stream.read(static_cast<char*>(data), std::streamsize(size));
++    if (!stream) return false;
++    if (decode && codec) {
++        const int status = codec(codec_user, disk_path.c_str(), name.c_str(), offset, data, size);
++        if (status != 0)
++            throw std::runtime_error("The codec reported error " + std::to_string(status) + " for " + name);
++    }
++    return true;
++}
++
++}  // namespace laya::model_files
+diff --git a/src/protocol.cpp b/src/protocol.cpp
+index c93265e..8a3a223 100644
+--- a/src/protocol.cpp
++++ b/src/protocol.cpp
+@@ -1,4 +1,5 @@
+ #include "laya/runtime.hpp"
++#include "laya/model_files.hpp"
+ #include <algorithm>
+ #include <cmath>
+ #include <fstream>
+@@ -34,7 +35,7 @@ agent::agent(const std::filesystem::path& directory, backend_type backend, bool
+     : agent(directory,backend,bf16 ? precision_type::bf16 : precision_type::fp32,flash,tensor_core,allow_truncation) {}
+ agent::agent(const std::filesystem::path& directory, backend_type backend, precision_type precision, bool flash, bool tensor_core, bool allow_truncation)
+     : model(directory, backend, precision, flash, tensor_core), tok(directory / "tokenizer/tokenizer.json"), allow_truncation(allow_truncation) {
+-    std::ifstream f(directory / "tokenizer/tokenizer_config.json"); settings = json::parse(f);
++    settings = json::parse(model_files::read_text(directory / "tokenizer/tokenizer_config.json"));
+ }
+ std::string agent::backend_name() const { return model.backend_name(); }
+ std::string agent::device_name() const { return model.device_name(); }
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index 479aa60..e323422 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -1,4 +1,5 @@
+ #include "laya/runtime.hpp"
++#include "laya/model_files.hpp"
+ #ifdef LAYA_COREML
+ #include "laya/coreml.hpp"
+ #endif
+@@ -55,9 +56,7 @@ using tensor = ggml_tensor;
+ using uint = uint32_t;
+ #include "vulkan/bf16_range.glsl"
+ json read_json(const std::filesystem::path& path) {
+-    std::ifstream f(path);
+-    if (!f) throw std::runtime_error("Cannot open " + path.string());
+-    return json::parse(f);
++    return json::parse(model_files::read_text(path));
+ }
+ struct graph_state {
+     ggml_context* ctx = nullptr;
+@@ -209,16 +208,16 @@ struct runtime::impl {
+         // An Apple GPU seen through Vulkan means MoltenVK, also from a Windows program under Wine.
+         vulkan_apple=vulkan && device.find("Apple")!=std::string::npos;
+ 
+-        std::ifstream file(directory / "model.safetensors", std::ios::binary | std::ios::ate);
+-        if (!file) throw std::runtime_error("Cannot open model.safetensors");
+-        auto file_size = uint64_t(file.tellg());
++        // Read through model_files: the file may be an entry of a mounted archive, and a codec
++        // may decode its bytes.
++        model_files::file file(directory / "model.safetensors");
++        auto file_size = file.size();
+         load_trace("model.safetensors opened, " + std::to_string(file_size / (1024 * 1024)) + " MB");
+-        file.seekg(0);
+         uint64_t header_size = 0;
+-        file.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
+-        if (!file || header_size > 16*1024*1024 || header_size + 8 > file_size)
++        if (!file.read(0, &header_size, sizeof(header_size)) || header_size > 16*1024*1024 || header_size + 8 > file_size)
+             throw std::runtime_error("Invalid safetensors header size");
+-        std::string header(header_size, '\0'); file.read(header.data(), header.size());
++        std::string header(header_size, '\0');
++        if (!file.read(8, header.data(), header.size())) throw std::runtime_error("Invalid safetensors header");
+         auto entries = json::parse(header);
+         load_trace("header parsed, " + std::to_string(entries.size()) + " entries");
+         std::set<std::string> required;
+@@ -290,8 +289,8 @@ struct runtime::impl {
+                 throw std::runtime_error("Invalid safetensors payload: " + name);
+             load_trace("tensor " + std::to_string(++tensor_index) + "/" + std::to_string(weights.size()) + " " + name);
+             std::vector<char> bytes(count * stride);
+-            file.seekg(8 + header_size + offsets[0]); file.read(bytes.data(), bytes.size());
+-            if (!file) throw std::runtime_error("Truncated tensor payload: " + name);
++            if (!file.read(8 + header_size + offsets[0], bytes.data(), bytes.size()))
++                throw std::runtime_error("Truncated tensor payload: " + name);
+             std::vector<float> values(count);
+             if (dtype == "F16") ggml_fp16_to_fp32_row(reinterpret_cast<const ggml_fp16_t*>(bytes.data()), values.data(), count);
+             else if (dtype == "BF16") ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t*>(bytes.data()), values.data(), count);
+diff --git a/src/tokenizer.cpp b/src/tokenizer.cpp
+index ad9fef0..8344838 100644
+--- a/src/tokenizer.cpp
++++ b/src/tokenizer.cpp
+@@ -1,4 +1,5 @@
+ #include "laya/runtime.hpp"
++#include "laya/model_files.hpp"
+ #include <unicode/normalizer2.h>
+ #include <unicode/regex.h>
+ #include <unicode/uchar.h>
+@@ -32,9 +33,7 @@ struct tokenizer::impl {
+     std::array<std::string,256> fallback;
+ 
+     explicit impl(const std::filesystem::path& path) {
+-        std::ifstream file(path);
+-        if (!file) throw std::runtime_error("Cannot open tokenizer: " + path.string());
+-        auto data = nlohmann::json::parse(file);
++        auto data = nlohmann::json::parse(model_files::read_text(path));
+         auto& spec = data.at("model");
+         metaspace=data.at("pre_tokenizer").at("type")=="Metaspace";
+         const bool byte_level=data.at("normalizer").at("type")=="NFC" &&
+diff --git a/tests/capi/test_sources.c b/tests/capi/test_sources.c
+new file mode 100644
+index 0000000..5b69c24
+--- /dev/null
++++ b/tests/capi/test_sources.c
+@@ -0,0 +1,118 @@
++/* test-sources: exercises the two ways the C API reads a model other than from a plain folder:
++ * a model in a .tar file, and a codec for the weights.
++ *
++ *   test-sources MODEL [OPTIONS_JSON] [--codec shift|fail]
++ *       Loads MODEL (a folder or a .tar file), asks one fixed question and prints one line:
++ *         OK <the answer, without the timing>
++ *         ERROR <the reason>
++ *       --codec shift  sets the test codec below with laya_set_codec
++ *       --codec fail   sets a codec that reports error 7
++ *
++ *   test-sources --encode IN OUT
++ *       Writes OUT as the stored form of IN for the "shift" test codec.
++ *
++ * The test codec is deliberately trivial: each stored byte is the plain byte plus a number that
++ * depends on its position in the file. It exists to check that the library passes the right
++ * blocks and offsets, nothing more.
++ */
++#include "laya_c.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static unsigned char shift_at(uint64_t position) { return (unsigned char) (position * 31u + 7u); }
++
++static uint64_t decoded_bytes = 0;
++static int decode_calls = 0;
++
++/* The file a block was read from must be the model as it was given: it ends in the weight
++ * file's name for a folder and in ".tar" for an archive, and it can be opened. */
++static int path_is_plausible(const char* path) {
++    const size_t n = strlen(path);
++    const char* weights = "model.safetensors";
++    const size_t w = strlen(weights);
++    FILE* f;
++    int tail_ok = (n > w && strcmp(path + n - w, weights) == 0 && (path[n - w - 1] == '\\' || path[n - w - 1] == '/')) ||
++                  (n > 4 && strcmp(path + n - 4, ".tar") == 0);
++    if (!tail_ok) return 0;
++    f = fopen(path, "rb");
++    if (!f) return 0;
++    fclose(f);
++    return 1;
++}
++
++static int LAYA_CALL shift_decode(void* user, const char* path, const char* file_name, uint64_t offset, void* data,
++                                  uint64_t size) {
++    unsigned char* bytes = (unsigned char*) data;
++    if (user != (void*) &decode_calls) return 90;                /* the user pointer must come back */
++    if (strcmp(file_name, "model.safetensors") != 0) return 91;  /* only the weights are decoded */
++    if (decode_calls == 0) {
++        if (!path_is_plausible(path)) return 92;
++        fprintf(stderr, "codec: reading %s\n", path);
++    }
++    for (uint64_t i = 0; i < size; i++) bytes[i] = (unsigned char) (bytes[i] - shift_at(offset + i));
++    decoded_bytes += size;
++    ++decode_calls;
++    return 0;
++}
++
++static int LAYA_CALL failing_decode(void* user, const char* path, const char* file_name, uint64_t offset, void* data,
++                                    uint64_t size) {
++    (void) user; (void) path; (void) file_name; (void) offset; (void) data; (void) size;
++    return 7;
++}
++
++static int encode_file(const char* in_name, const char* out_name) {
++    FILE* in = fopen(in_name, "rb");
++    FILE* out = in ? fopen(out_name, "wb") : NULL;
++    static unsigned char buffer[1 << 20];
++    uint64_t position = 0;
++    size_t n;
++    if (!in || !out) { printf("ERROR cannot open the files\n"); return 1; }
++    while ((n = fread(buffer, 1, sizeof buffer, in)) > 0) {
++        for (size_t i = 0; i < n; i++) buffer[i] = (unsigned char) (buffer[i] + shift_at(position + i));
++        if (fwrite(buffer, 1, n, out) != n) { printf("ERROR cannot write\n"); return 1; }
++        position += n;
++    }
++    fclose(in);
++    if (fclose(out) != 0) { printf("ERROR cannot write\n"); return 1; }
++    printf("OK %llu bytes\n", (unsigned long long) position);
++    return 0;
++}
++
++int main(int argc, char** argv) {
++    const char* options = "";
++    const char* codec = "";
++    laya_agent* agent;
++    char* answer;
++    char* timing;
++
++    if (argc == 4 && strcmp(argv[1], "--encode") == 0) return encode_file(argv[2], argv[3]);
++    if (argc < 2) { printf("usage: test-sources MODEL [OPTIONS_JSON] [--codec shift|fail]\n"); return 2; }
++    for (int i = 2; i < argc; i++) {
++        if (strcmp(argv[i], "--codec") == 0 && i + 1 < argc) codec = argv[++i];
++        else options = argv[i];
++    }
++    if (strcmp(codec, "shift") == 0) laya_set_codec(shift_decode, &decode_calls);
++    else if (strcmp(codec, "fail") == 0) laya_set_codec(failing_decode, NULL);
++
++    agent = laya_create(argv[1], options);
++    if (!agent) { printf("ERROR %s\n", laya_last_error()); return 1; }
++    answer = laya_predict(agent,
++        "{\"state\":\"Please refund the duplicate charge.\",\"questions\":{\"refund\":"
++        "{\"type\":\"noul\",\"instructions\":\"Does the customer ask for a refund?\"}}}");
++    if (!answer) { printf("ERROR no answer\n"); return 1; }
++    if (strncmp(answer, "{\"error\"", 8) == 0) { printf("ERROR %s\n", answer); return 1; }
++    timing = strstr(answer, ",\"elapsed_ms\"");
++    if (timing) *timing = '\0';  /* everything after the results varies from run to run */
++    printf("OK %s\n", answer);
++    if (*codec) fprintf(stderr, "codec: %d calls, %llu bytes\n", decode_calls, (unsigned long long) decoded_bytes);
++    laya_free_string(answer);
++    laya_destroy(agent);
++
++    /* A second load must work too, and without the codec a plain model must still load. */
++    laya_set_codec(NULL, NULL);
++    return 0;
++}
+diff --git a/tests/capi/test_sources.py b/tests/capi/test_sources.py
+new file mode 100644
+index 0000000..b09fa94
+--- /dev/null
++++ b/tests/capi/test_sources.py
+@@ -0,0 +1,163 @@
++#!/usr/bin/env python3
++"""Runs test-sources over many forms of one model.
++
++    python3 tests/capi/test_sources.py BIN_DIR MODEL_DIR [--wine] [--work DIR]
++
++BIN_DIR holds test-sources (or test-sources.exe) and the library; MODEL_DIR is a model folder.
++Every form of the model that should load must give the answer of the plain folder, and every
++broken form must fail with the expected message. With --wine the Windows program is run
++through Wine. The forms are written to --work (default: a folder in the system's temporary
++directory), one at a time, each as large as the model; the folder is removed at the end.
++"""
++import argparse, io, os, shutil, subprocess, sys, tarfile, tempfile
++
++FILES = ['rl_agent_config.json', 'encoder/config.json', 'model.safetensors',
++         'tokenizer/tokenizer.json', 'tokenizer/tokenizer_config.json']
++WEIGHTS = 'model.safetensors'
++
++parser = argparse.ArgumentParser()
++parser.add_argument('bin_dir')
++parser.add_argument('model_dir')
++parser.add_argument('--wine', action='store_true')
++parser.add_argument('--work')
++args = parser.parse_args()
++
++BIN = os.path.abspath(args.bin_dir)
++MODEL = os.path.abspath(args.model_dir)
++ROOT = os.path.abspath(args.work) if args.work else tempfile.mkdtemp(prefix='laya-sources-')
++WORK = os.path.join(ROOT, 'work')
++
++
++def shown(path):
++    """The path as the program under test has to be given it."""
++    return 'Z:' + path.replace('/', '\\') if args.wine else path
++
++
++def run(*arguments):
++    env = dict(os.environ)
++    if args.wine:
++        env['WINEDEBUG'] = '-all'
++        command = ['wine', 'test-sources.exe', *arguments]
++    else:
++        env['LD_LIBRARY_PATH'] = BIN + os.pathsep + env.get('LD_LIBRARY_PATH', '')
++        env['DYLD_LIBRARY_PATH'] = BIN + os.pathsep + env.get('DYLD_LIBRARY_PATH', '')
++        command = [os.path.join(BIN, 'test-sources'), *arguments]
++    p = subprocess.run(command, cwd=BIN, env=env, capture_output=True, text=True, timeout=1800)
++    lines = [l.strip() for l in p.stdout.replace('\r', '').split('\n') if l.strip()]
++    return lines[-1] if lines else 'NO OUTPUT (exit %d) %s' % (p.returncode, p.stderr[-300:])
++
++
++results = []
++
++
++def check(name, got, want_ok=None, want_error=None):
++    good = got == want_ok if want_ok is not None else got.startswith('ERROR') and want_error in got
++    results.append(good)
++    print(('PASS ' if good else 'FAIL ') + name + ('' if good else '\n     got: ' + got[:300]))
++    sys.stdout.flush()
++
++
++def fresh():
++    shutil.rmtree(WORK, ignore_errors=True)
++    os.makedirs(WORK)
++
++
++def make_tar(path, fmt, prefix='', extra=None, skip=(), weights=None):
++    with tarfile.open(path, 'w', format=fmt) as tar:
++        for name, data in (extra or []):
++            info = tarfile.TarInfo(name)
++            info.size = len(data)
++            tar.addfile(info, io.BytesIO(data))
++        for name in FILES:
++            if name in skip:
++                continue
++            source = weights if (name == WEIGHTS and weights) else os.path.join(MODEL, name)
++            info = tarfile.TarInfo(prefix + name)
++            info.size = os.path.getsize(source)
++            with open(source, 'rb') as f:
++                tar.addfile(info, f)
++
++
++fresh()
++baseline = run(shown(MODEL))
++print('plain folder:', baseline[:160])
++sys.stdout.flush()
++if not baseline.startswith('OK'):
++    sys.exit(1)
++
++# the stored form of the weights for the test codec of test-sources
++coded = os.path.join(ROOT, 'coded.safetensors')
++print('stored form of the weights:', run('--encode', shown(os.path.join(MODEL, WEIGHTS)), shown(coded)))
++
++T = os.path.join(WORK, 'model.tar')
++long_folder = 'a-folder-with-a-very-long-name-' + 'x' * 120 + '/'
++
++# archives
++for name, options in [
++    ('tar, ustar, files at the top', dict(fmt=tarfile.USTAR_FORMAT)),
++    ('tar, gnu, inside one folder', dict(fmt=tarfile.GNU_FORMAT, prefix='laya-model/')),
++    ('tar, pax, inside one folder', dict(fmt=tarfile.PAX_FORMAT, prefix='laya-model/')),
++    ('tar, gnu, long names', dict(fmt=tarfile.GNU_FORMAT, prefix=long_folder)),
++    ('tar, pax, long names', dict(fmt=tarfile.PAX_FORMAT, prefix=long_folder)),
++    ('tar, names with ./', dict(fmt=tarfile.GNU_FORMAT, prefix='./')),
++    ('tar, with resource-fork entries', dict(fmt=tarfile.PAX_FORMAT,
++                                             extra=[('._rl_agent_config.json', b'junk'),
++                                                    ('tokenizer/._tokenizer.json', b'junk')])),
++]:
++    fresh()
++    make_tar(T, **options)
++    check(name, run(shown(T)), want_ok=baseline)
++
++fresh()
++make_tar(T, tarfile.GNU_FORMAT, prefix='typed-decisions/')
++check('tar, variant folder only, variant option', run(shown(T), '{"variant":"typed-decisions"}'), want_ok=baseline)
++fresh()
++make_tar(T, tarfile.GNU_FORMAT, prefix='store/typed-decisions/')
++check('tar, store with a variant folder, variant option', run(shown(T), '{"variant":"typed-decisions"}'), want_ok=baseline)
++check('tar, store with a variant folder, no variant option', run(shown(T)), want_error='Cannot open')
++
++# codec
++fresh()
++make_tar(T, tarfile.GNU_FORMAT, weights=coded)
++check('coded tar, with the codec', run(shown(T), '--codec', 'shift'), want_ok=baseline)
++check('coded tar, without the codec', run(shown(T)), want_error='Invalid safetensors header')
++fresh()
++make_tar(T, tarfile.PAX_FORMAT, prefix='laya-model/', weights=coded)
++check('coded tar inside one folder, with the codec', run(shown(T), '--codec', 'shift'), want_ok=baseline)
++fresh()
++folder = os.path.join(WORK, 'coded-model')
++os.makedirs(os.path.join(folder, 'encoder'))
++os.makedirs(os.path.join(folder, 'tokenizer'))
++for name in FILES:
++    source = coded if name == WEIGHTS else os.path.join(MODEL, name)
++    os.symlink(os.path.realpath(source), os.path.join(folder, name))
++check('coded folder, with the codec', run(shown(folder), '--codec', 'shift'), want_ok=baseline)
++check('coded folder, without the codec', run(shown(folder)), want_error='Invalid safetensors header')
++check('plain folder, codec that fails', run(shown(MODEL), '--codec', 'fail'),
++      want_error='The codec reported error 7 for model.safetensors')
++check('plain folder, an option that does not exist', run(shown(MODEL), '{"codec":"x"}'), want_error='Unknown option: codec')
++
++# broken input
++fresh()
++check('a file that is not a tar', run(shown(os.path.join(MODEL, 'tokenizer', 'tokenizer.json'))),
++      want_error='not a folder and not an uncompressed tar archive')
++make_tar(T, tarfile.GNU_FORMAT, skip=('tokenizer/tokenizer.json',))
++check('tar without the tokenizer', run(shown(T)), want_error='no such file in the archive')
++fresh()
++make_tar(T, tarfile.GNU_FORMAT)
++with open(T, 'r+b') as f:
++    f.truncate(os.path.getsize(T) // 2)
++check('tar cut in half', run(shown(T)), want_error='Truncated tar archive')
++fresh()
++with open(T, 'wb') as f:
++    f.write(b'\x1f\x8b' + os.urandom(4096))
++check('a compressed file', run(shown(T)), want_error='not a folder and not an uncompressed tar archive')
++check('a folder that does not exist', run(shown(os.path.join(ROOT, 'nothing-here'))), want_error='Cannot open')
++check('plain folder again', run(shown(MODEL)), want_ok=baseline)
++
++shutil.rmtree(WORK, ignore_errors=True)
++os.remove(coded)
++if not args.work:
++    shutil.rmtree(ROOT, ignore_errors=True)
++print('%d of %d passed' % (sum(results), len(results)))
++sys.exit(0 if all(results) else 1)
+-- 
+2.43.0
+

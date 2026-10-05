@@ -21,7 +21,7 @@ ICU_VERSION=${ICU_VERSION:-76-1}
 ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
 JOBS=${JOBS:-$(nproc)}
 VARIANTS=${VARIANTS:-"avx2 compat"}
-VERSION=${LAYA_C_VERSION:-1.0.14}
+VERSION=${LAYA_C_VERSION:-1.0.15}
 mkdir -p "$WORK" && cd "$WORK"
 
 # 1. Static, position-independent ICU (the system one is a shared, version-specific library).
@@ -63,7 +63,7 @@ for variant in $VARIANTS; do
     -DCMAKE_CXX_FLAGS="-DU_STATIC_IMPLEMENTATION" \
     -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
     -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" ${EXTRA_CMAKE_ARGS:-}
-  cmake --build "$ROOT/build-linux-$variant" --parallel "$JOBS" --target laya_c test-capi laya-cli laya-bench laya-diag laya-trace laya-probe
+  cmake --build "$ROOT/build-linux-$variant" --parallel "$JOBS" --target laya_c test-capi test-sources laya-cli laya-bench laya-diag laya-trace laya-probe
   strip --strip-unneeded "$ROOT/build-linux-$variant/bin/liblaya.so"
   echo "== $variant: $ROOT/build-linux-$variant/bin/liblaya.so"
   readelf -d "$ROOT/build-linux-$variant/bin/liblaya.so" | grep NEEDED

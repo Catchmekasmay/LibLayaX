@@ -1,4 +1,5 @@
 #include "laya/runtime.hpp"
+#include "laya/model_files.hpp"
 #include <unicode/normalizer2.h>
 #include <unicode/regex.h>
 #include <unicode/uchar.h>
@@ -32,9 +33,7 @@ struct tokenizer::impl {
     std::array<std::string,256> fallback;
 
     explicit impl(const std::filesystem::path& path) {
-        std::ifstream file(path);
-        if (!file) throw std::runtime_error("Cannot open tokenizer: " + path.string());
-        auto data = nlohmann::json::parse(file);
+        auto data = nlohmann::json::parse(model_files::read_text(path));
         auto& spec = data.at("model");
         metaspace=data.at("pre_tokenizer").at("type")=="Metaspace";
         const bool byte_level=data.at("normalizer").at("type")=="NFC" &&

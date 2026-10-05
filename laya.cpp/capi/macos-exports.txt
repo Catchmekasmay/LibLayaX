@@ -8,3 +8,4 @@ _laya_info
 _laya_free_string
 _laya_destroy
 _laya_last_error
+_laya_set_codec

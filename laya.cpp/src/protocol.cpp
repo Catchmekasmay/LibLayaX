@@ -1,4 +1,5 @@
 #include "laya/runtime.hpp"
+#include "laya/model_files.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -34,7 +35,7 @@ agent::agent(const std::filesystem::path& directory, backend_type backend, bool 
     : agent(directory,backend,bf16 ? precision_type::bf16 : precision_type::fp32,flash,tensor_core,allow_truncation) {}
 agent::agent(const std::filesystem::path& directory, backend_type backend, precision_type precision, bool flash, bool tensor_core, bool allow_truncation)
     : model(directory, backend, precision, flash, tensor_core), tok(directory / "tokenizer/tokenizer.json"), allow_truncation(allow_truncation) {
-    std::ifstream f(directory / "tokenizer/tokenizer_config.json"); settings = json::parse(f);
+    settings = json::parse(model_files::read_text(directory / "tokenizer/tokenizer_config.json"));
 }
 std::string agent::backend_name() const { return model.backend_name(); }
 std::string agent::device_name() const { return model.device_name(); }

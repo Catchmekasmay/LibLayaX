@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=${WORK:-$ROOT/build-deps}
 JOBS=${JOBS:-$(nproc)}
-VERSION=${LAYA_C_VERSION:-1.0.14}
+VERSION=${LAYA_C_VERSION:-1.0.15}
 ICU_VERSION=${ICU_VERSION:-76-1}
 ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
 W=$ROOT/cmake/toolchains/zig
@@ -66,7 +66,7 @@ for target in $TARGETS; do
     -DICU_ROOT="$prefix" -DICU_INCLUDE_DIR="$prefix/include" -DICU_UC_LIBRARY_RELEASE="$prefix/lib/$uc" \
     -DICU_I18N_LIBRARY_RELEASE="$prefix/lib/$in" -DICU_DATA_LIBRARY_RELEASE="$prefix/lib/$dt" \
     -DCMAKE_CXX_FLAGS=-DU_STATIC_IMPLEMENTATION -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-cli laya-bench laya-diag laya-probe $tools
+  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-cli laya-bench laya-diag laya-probe $tools
   if [ $target = windows ]; then  # import library for Visual C++ users
     "$M/llvm-dlltool" -m arm64 -d "$ROOT/capi/laya.def" -D laya.dll -l "$B/bin/laya.lib"
   fi

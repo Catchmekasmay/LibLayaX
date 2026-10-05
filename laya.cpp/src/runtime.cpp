@@ -1,4 +1,5 @@
 #include "laya/runtime.hpp"
+#include "laya/model_files.hpp"
 #ifdef LAYA_COREML
 #include "laya/coreml.hpp"
 #endif
@@ -55,9 +56,7 @@ using tensor = ggml_tensor;
 using uint = uint32_t;
 #include "vulkan/bf16_range.glsl"
 json read_json(const std::filesystem::path& path) {
-    std::ifstream f(path);
-    if (!f) throw std::runtime_error("Cannot open " + path.string());
-    return json::parse(f);
+    return json::parse(model_files::read_text(path));
 }
 struct graph_state {
     ggml_context* ctx = nullptr;
@@ -86,7 +85,7 @@ struct runtime::impl {
     std::set<std::string> compensated_weights;
     std::unique_ptr<graph_state> main_graph, action_graph;
     bool low_precision, flash, tensor_core;
-    bool vulkan_nvidia=false, vulkan_amd=false;
+    bool vulkan_nvidia=false, vulkan_amd=false, vulkan_apple=false;
     ggml_type low_type = GGML_TYPE_BF16;
     bool vulkan = false;
     int width = 1024, heads = 16, layers = 28, intermediate = 2624, vocabulary = 50368, n_actions;
@@ -206,17 +205,19 @@ struct runtime::impl {
         load_trace("device: " + device);
         vulkan_nvidia=vulkan && device.find("NVIDIA")!=std::string::npos;
         vulkan_amd=vulkan && device.find("AMD")!=std::string::npos;
+        // An Apple GPU seen through Vulkan means MoltenVK, also from a Windows program under Wine.
+        vulkan_apple=vulkan && device.find("Apple")!=std::string::npos;
 
-        std::ifstream file(directory / "model.safetensors", std::ios::binary | std::ios::ate);
-        if (!file) throw std::runtime_error("Cannot open model.safetensors");
-        auto file_size = uint64_t(file.tellg());
+        // Read through model_files: the file may be an entry of a mounted archive, and a codec
+        // may decode its bytes.
+        model_files::file file(directory / "model.safetensors");
+        auto file_size = file.size();
         load_trace("model.safetensors opened, " + std::to_string(file_size / (1024 * 1024)) + " MB");
-        file.seekg(0);
         uint64_t header_size = 0;
-        file.read(reinterpret_cast<char*>(&header_size), sizeof(header_size));
-        if (!file || header_size > 16*1024*1024 || header_size + 8 > file_size)
+        if (!file.read(0, &header_size, sizeof(header_size)) || header_size > 16*1024*1024 || header_size + 8 > file_size)
             throw std::runtime_error("Invalid safetensors header size");
-        std::string header(header_size, '\0'); file.read(header.data(), header.size());
+        std::string header(header_size, '\0');
+        if (!file.read(8, header.data(), header.size())) throw std::runtime_error("Invalid safetensors header");
         auto entries = json::parse(header);
         load_trace("header parsed, " + std::to_string(entries.size()) + " entries");
         std::set<std::string> required;
@@ -288,8 +289,8 @@ struct runtime::impl {
                 throw std::runtime_error("Invalid safetensors payload: " + name);
             load_trace("tensor " + std::to_string(++tensor_index) + "/" + std::to_string(weights.size()) + " " + name);
             std::vector<char> bytes(count * stride);
-            file.seekg(8 + header_size + offsets[0]); file.read(bytes.data(), bytes.size());
-            if (!file) throw std::runtime_error("Truncated tensor payload: " + name);
+            if (!file.read(8 + header_size + offsets[0], bytes.data(), bytes.size()))
+                throw std::runtime_error("Truncated tensor payload: " + name);
             std::vector<float> values(count);
             if (dtype == "F16") ggml_fp16_to_fp32_row(reinterpret_cast<const ggml_fp16_t*>(bytes.data()), values.data(), count);
             else if (dtype == "BF16") ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t*>(bytes.data()), values.data(), count);
@@ -758,17 +759,19 @@ runtime::~runtime() = default;
 // 524288 elements ggml's element-wise dispatch gains a third slab and writes outside its tensor
 // (seen on Apple M3 Ultra; single sequences, which never exceed 512 tokens, and the FP16/BF16
 // kernels are unaffected). Rows are independent, so splitting the batch gives the same results.
+// MoltenVK is assumed in a macOS build, and elsewhere when the GPU is an Apple one: a Windows
+// program under Wine on a Mac reaches the same MoltenVK through Wine's Vulkan.
 // LAYA_MAX_PASS_TOKENS overrides the limit for any backend (0 disables it).
-static int pass_token_limit(bool vulkan, bool low_precision) {
+static int pass_token_limit(bool vulkan, bool apple_gpu, bool low_precision) {
     if (const char* text = std::getenv("LAYA_MAX_PASS_TOKENS")) return std::max(0, std::atoi(text));
 #ifdef __APPLE__
-    if (vulkan && !low_precision) return 512;
+    apple_gpu = true;
 #endif
-    (void)vulkan; (void)low_precision;
+    if (vulkan && apple_gpu && !low_precision) return 512;
     return 0;
 }
 raw_result runtime::forward(const batch& input) {
-    const int limit = pass_token_limit(p->vulkan, p->low_precision);
+    const int limit = pass_token_limit(p->vulkan, p->vulkan_apple, p->low_precision);
     const int rows = limit > 0 && input.length > 0 ? std::max(1, limit / input.length) : input.size;
     if (rows >= input.size) return p->run(input);
     raw_result result;

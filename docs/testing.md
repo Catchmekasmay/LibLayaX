@@ -127,6 +127,7 @@ working on the engine. It is not in the Windows packages.
 | File in `laya.cpp/tests/capi/` | Purpose |
 |---|---|
 | `test_capi.c` | The suite above. With CMake: `ctest -R capi`. |
+| `test_sources.c`, `test_sources.py` | Models in a `.tar` file and codecs for the weights ([Model files](model-files.md)). `test-sources` loads one model, in any form, and prints its answer to a fixed question; the Python script writes the same model in 23 forms (archives of each tar format, with long names, inside a folder, with the weights in a stored form, cut short, and so on) and checks that each one gives the answer of the plain folder or fails with the expected message: `python3 tests/capi/test_sources.py BIN_DIR MODEL_DIR` (`--wine` for the Windows build). |
 | `test_parity.py` | Loads the library from Python and checks that its answers are byte-identical to the `laya-cli` tool of laya.cpp. With `--compare-dump` it also compares with a dump made on another platform. |
 | `make_synthetic_model.py` | Writes a model with the real architecture and a real tokenizer but random weights: `python tests/capi/make_synthetic_model.py DIR`. It exercises the whole pipeline without the 800 MB download. Its answers mean nothing. |
 

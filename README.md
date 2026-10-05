@@ -5,7 +5,7 @@
 **Fast local AI decisions inside your application.** LibLayaX runs the Laya AI model
 in-process, as an ordinary library, on six platforms: hundreds of decisions per second on a
 laptop GPU, with no server and no cloud. An unofficial C API library built on laya.cpp.
-Version 1.0.14.
+Version 1.0.15.
 
 ## What this project is for
 
@@ -138,7 +138,7 @@ batch size; `laya-bench /path/to/model` prints them for your machine.
 | Delphi, Free Pascal | `Laya.pas`, with the `TLayaAgent` class | the **DLaya** repository |
 | Rust | the `rlaya` crate, with the `Agent` type | the **RLaya** repository |
 | Lua | the `llaya` module (binaries for Lua 5.1) | the **LLaya** repository |
-| C#, Python, Go, Java, ... | the language's own way of loading a C library | declare the ten functions from `laya_c.h` |
+| C#, Python, Go, Java, ... | the language's own way of loading a C library | declare the functions from `laya_c.h` |
 
 DLaya, RLaya and LLaya are small projects that sit on top of this library; each has its own
 README, tests and example. Their source is not in this repository or in the binary
@@ -187,13 +187,14 @@ The [`docs/`](docs/README.md) folder is the manual for the library.
 |---|---|
 | [Getting started](docs/getting-started.md) | Pick a package, download the model, get a first answer from ten lines of C. |
 | [Requests and answers](docs/requests.md) | The three question types, several questions at once, batches, every field of the answer, the size limits. |
-| [The API](docs/api.md) | The ten functions one by one: arguments, results, memory, threads, errors, logging. |
+| [The API](docs/api.md) | The eleven functions one by one: arguments, results, memory, threads, errors, logging. |
 | [Options](docs/options.md) | CPU or GPU, precision, threads, which GPU, which model variant. |
 | [Platforms and packages](docs/platforms.md) | Which library for which system, how to ship it with an application, what has been tested. |
 | [Language bindings](docs/bindings.md) | DLaya, RLaya and LLaya, and how to call the library from any other language. |
 | [Troubleshooting](docs/troubleshooting.md) | Error messages, the debug trace, crash reports, known problems. |
 | [Testing](docs/testing.md) | The test and benchmark tools in every package. |
 | [Building from source](docs/building.md) | Building every platform, and what LibLayaX adds to laya.cpp. |
+| [Model files](docs/model-files.md) | A model as a folder or as one `.tar` file, and codecs for the weights. |
 | [History](docs/history.md) | What changed in each version. |
 
 ## What is in here

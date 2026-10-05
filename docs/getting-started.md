@@ -14,6 +14,7 @@ Download the package for your system from the releases page and unzip it.
 | Windows x64, processor with AVX2 (Intel since 2013, AMD since Zen) | `laya-windows-…-avx2` |
 | Windows x64, any processor; or an x64 program on Windows on ARM | `laya-windows-…-compat-sse42` |
 | Windows x64 with a GPU | `laya-windows-…-vulkan` |
+| Windows x64 with a GPU, for an x64 program under an emulator without AVX (Wine on an Apple Silicon Mac) | `laya-windows-…-vulkan-compat-sse42` |
 | Windows ARM64, native program | `laya-windows-arm64-…` |
 | Linux x86-64 | `laya-linux-…` (folders `avx2`, `compat-sse42`, `vulkan`) |
 | Linux ARM64 | `laya-linux-arm64-…` |
@@ -21,7 +22,7 @@ Download the package for your system from the releases page and unzip it.
 | macOS, Intel | `laya-macos-…-x86_64-avx2` or `…-x86_64-compat-sse42` |
 
 Choose by the architecture of **your program**, not of the machine: an x64 program running
-on Windows on ARM needs the x64 `compat-sse42` library. [Platforms and packages](platforms.md)
+on Windows on ARM needs an x64 `compat-sse42` library. [Platforms and packages](platforms.md)
 has the details.
 
 Each package contains the library (`laya.dll`, `liblaya.so` or `liblaya.dylib`), the header

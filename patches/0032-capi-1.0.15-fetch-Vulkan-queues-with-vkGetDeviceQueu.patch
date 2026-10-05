@@ -1,0 +1,114 @@
+From 995d2d510afbb9b8ed05e18ca07bac1ae3c42fcf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 4 Oct 2026 23:47:41 +0100
+Subject: [PATCH] capi 1.0.15: fetch Vulkan queues with vkGetDeviceQueue (Wine
+ 10.20+ returned no queue); MoltenVK FP32 pass limit also for Apple GPUs seen
+ from other builds
+
+Wine 10.20 and later look a queue up by comparing the whole VkDeviceQueueInfo2 of
+vkGetDeviceQueue2, padding included. ggml passes a structure with uninitialized padding, so
+Wine returned VK_NULL_HANDLE and the first vkQueueSubmit faulted inside Wine. Confirmed on an
+Apple M3 Ultra (a Wine build with the 10.20/11.0 thunks, MoltenVK 1.4.1) with laya-gpu-probe.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LAsYHSSgSysMFa8MKPJWgL
+---
+ cmake/VulkanPrecision.cmake |  1 +
+ cmake/VulkanQueue.cmake     | 26 ++++++++++++++++++++++++++
+ src/runtime.cpp             | 14 +++++++++-----
+ 3 files changed, 36 insertions(+), 5 deletions(-)
+ create mode 100644 cmake/VulkanQueue.cmake
+
+diff --git a/cmake/VulkanPrecision.cmake b/cmake/VulkanPrecision.cmake
+index 27cf902..881aa8c 100644
+--- a/cmake/VulkanPrecision.cmake
++++ b/cmake/VulkanPrecision.cmake
+@@ -47,6 +47,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/VulkanAmdAttention.cmake)
+ include(${CMAKE_CURRENT_LIST_DIR}/VulkanAmdProjection.cmake)
+ include(${CMAKE_CURRENT_LIST_DIR}/VulkanAmdBf16Projection.cmake)
+ include(${CMAKE_CURRENT_LIST_DIR}/VulkanBf16Status.cmake)
++include(${CMAKE_CURRENT_LIST_DIR}/VulkanQueue.cmake)
+ set(generated_vulkan "${CMAKE_CURRENT_BINARY_DIR}/laya-ggml-vulkan.cpp")
+ if(EXISTS "${generated_vulkan}")
+   file(READ "${generated_vulkan}" previous_vulkan_code)
+diff --git a/cmake/VulkanQueue.cmake b/cmake/VulkanQueue.cmake
+new file mode 100644
+index 0000000..82b2068
+--- /dev/null
++++ b/cmake/VulkanQueue.cmake
+@@ -0,0 +1,26 @@
++# The pinned ggml fetches its queues with vkGetDeviceQueue2 and a vk::DeviceQueueInfo2 whose
++# padding bytes are not initialized. Wine 10.20 and later (11.0 included) look the queue up by
++# comparing the whole structure byte by byte, so with non-zero padding they find no queue and
++# return VK_NULL_HANDLE; the first vkQueueSubmit then faults inside Wine ("Assertion failed:
++# !status && "vkQueueSubmit"" in winevulkan's loader_thunks.c). Real drivers read the fields only.
++#
++# A queue created without flags is fetched with vkGetDeviceQueue, which is also what the Vulkan
++# specification asks for. A queue created with flags goes through vkGetDeviceQueue2 with a
++# structure that is zeroed first. A missing queue is reported at load time.
++laya_vk_replace(
++  "    h->queue = device->device.getQueue2(queue_info2);"
++  [=[    if (device->has_internally_synchronized_queues) {
++        VkDeviceQueueInfo2 zeroed_info;
++        memset(&zeroed_info, 0, sizeof(zeroed_info));
++        zeroed_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_INFO_2;
++        zeroed_info.flags = static_cast<VkDeviceQueueCreateFlags>(queue_info2.flags);
++        zeroed_info.queueFamilyIndex = queue_family_index;
++        zeroed_info.queueIndex = queue_index;
++        h->queue = device->device.getQueue2(*reinterpret_cast<const vk::DeviceQueueInfo2 *>(&zeroed_info));
++    } else {
++        h->queue = device->device.getQueue(queue_family_index, queue_index);
++    }
++    if (!h->queue) {
++        throw std::runtime_error("The Vulkan driver returned no queue for family " + std::to_string(queue_family_index) +
++                                 ", index " + std::to_string(queue_index));
++    }]=])
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index 4dd343b..479aa60 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -86,7 +86,7 @@ struct runtime::impl {
+     std::set<std::string> compensated_weights;
+     std::unique_ptr<graph_state> main_graph, action_graph;
+     bool low_precision, flash, tensor_core;
+-    bool vulkan_nvidia=false, vulkan_amd=false;
++    bool vulkan_nvidia=false, vulkan_amd=false, vulkan_apple=false;
+     ggml_type low_type = GGML_TYPE_BF16;
+     bool vulkan = false;
+     int width = 1024, heads = 16, layers = 28, intermediate = 2624, vocabulary = 50368, n_actions;
+@@ -206,6 +206,8 @@ struct runtime::impl {
+         load_trace("device: " + device);
+         vulkan_nvidia=vulkan && device.find("NVIDIA")!=std::string::npos;
+         vulkan_amd=vulkan && device.find("AMD")!=std::string::npos;
++        // An Apple GPU seen through Vulkan means MoltenVK, also from a Windows program under Wine.
++        vulkan_apple=vulkan && device.find("Apple")!=std::string::npos;
+ 
+         std::ifstream file(directory / "model.safetensors", std::ios::binary | std::ios::ate);
+         if (!file) throw std::runtime_error("Cannot open model.safetensors");
+@@ -758,17 +760,19 @@ runtime::~runtime() = default;
+ // 524288 elements ggml's element-wise dispatch gains a third slab and writes outside its tensor
+ // (seen on Apple M3 Ultra; single sequences, which never exceed 512 tokens, and the FP16/BF16
+ // kernels are unaffected). Rows are independent, so splitting the batch gives the same results.
++// MoltenVK is assumed in a macOS build, and elsewhere when the GPU is an Apple one: a Windows
++// program under Wine on a Mac reaches the same MoltenVK through Wine's Vulkan.
+ // LAYA_MAX_PASS_TOKENS overrides the limit for any backend (0 disables it).
+-static int pass_token_limit(bool vulkan, bool low_precision) {
++static int pass_token_limit(bool vulkan, bool apple_gpu, bool low_precision) {
+     if (const char* text = std::getenv("LAYA_MAX_PASS_TOKENS")) return std::max(0, std::atoi(text));
+ #ifdef __APPLE__
+-    if (vulkan && !low_precision) return 512;
++    apple_gpu = true;
+ #endif
+-    (void)vulkan; (void)low_precision;
++    if (vulkan && apple_gpu && !low_precision) return 512;
+     return 0;
+ }
+ raw_result runtime::forward(const batch& input) {
+-    const int limit = pass_token_limit(p->vulkan, p->low_precision);
++    const int limit = pass_token_limit(p->vulkan, p->vulkan_apple, p->low_precision);
+     const int rows = limit > 0 && input.length > 0 ? std::max(1, limit / input.length) : input.size;
+     if (rows >= input.size) return p->run(input);
+     raw_result result;
+-- 
+2.43.0
+

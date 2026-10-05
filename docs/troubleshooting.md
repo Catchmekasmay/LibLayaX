@@ -39,7 +39,7 @@ and the backends in that file.
 | `No usable Vulkan GPU found` | Vulkan is there but lists no GPU. This is also what Linux under WSL gives: WSL has no native GPU driver for Vulkan, even when the same GPU works from Windows. | Update the driver, or use the CPU. Under WSL, use the CPU backend, or run the Windows library from Windows. |
 | `Vulkan device … does not exist`, `No Vulkan GPU matches "…"` | The `device` option points at a GPU that is not there. | The message lists what was found. |
 | `FP16 currently requires Vulkan`, `BF16 mode requires a GPU; …` | A half precision on the CPU. | Use `fp32` on the CPU. |
-| `This laya build needs CPU instructions your processor (or virtual machine) does not provide: …` | An `avx2` library on a processor without AVX2, or under an emulator. | Use the `compat-sse42` library. |
+| `This laya build needs CPU instructions your processor (or virtual machine) does not provide: …` | An `avx2` or `vulkan` library on a processor without AVX2, or under an emulator such as Rosetta. The check is the same for every backend. | Use the `compat-sse42` library. `vulkan-compat-sse42` has both backends on that baseline. |
 | `Insufficient device memory for model weights` | The GPU does not have enough free memory for the model. | Close other GPU programs, or use the CPU. |
 
 ## laya_predict returns an error
@@ -132,7 +132,17 @@ try `LAYA_MAX_PASS_TOKENS=512`, and please report what you found with the output
   more than 512 tokens with `fp32` writes outside its memory and gives wrong answers. The
   library works around it by splitting such batches, which gives the same answers as an
   unsplit pass would. The cause itself is not fixed and has not been reported upstream.
+  From 1.0.15 the Windows and Linux libraries do the same when the GPU is an Apple one, which
+  is what a Windows program under Wine on a Mac sees.
   `fp16` and `bf16` are not affected and are faster, so use those on a Mac.
+* **Wine, GPU, before 1.0.15.** A Windows program under Wine 10.20 or later (11.0 included)
+  loaded a model on the GPU, and the first question stopped the program with
+  `Assertion failed: !status && "vkQueueSubmit"`, printed by Wine's Vulkan layer. Wine looks a
+  queue up by comparing the whole structure given to `vkGetDeviceQueue2`, padding bytes
+  included; the engine's Vulkan code (ggml) left those bytes unset, got no queue, and
+  submitted its first work without one. 1.0.15 fetches the queue with `vkGetDeviceQueue` and
+  reports a missing queue when the model loads. Found on an Apple M3 Ultra with a Wine build
+  for macOS under Rosetta; Wine on Linux has the same lookup.
 * **Windows ARM64 and Zig.** A DLL built with Zig 0.16 for Windows ARM64 hung on real
   hardware in the first call that reports an error. The cause was never found. The released
   DLL is built with llvm-mingw, which works.

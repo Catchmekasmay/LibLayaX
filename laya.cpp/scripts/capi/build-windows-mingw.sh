@@ -44,8 +44,9 @@ fi
 #           PCs without Vulkan. Needs VULKAN_HEADERS (Vulkan-Headers/include), SPIRV_HEADERS
 #           (SPIRV-Headers/include), GLSLC (shaderc >= 2025.3) and VULKAN_DEF (a .def listing the
 #           exports of vulkan-1.dll, e.g. generated from Wine's or the SDK's vulkan-1.dll).
+#   vulkan-compat  cpu (SSE4.2) + vulkan backends; same requirements as vulkan.
 I=$WORK/icu-win
-VERSION=${LAYA_C_VERSION:-1.0.14}
+VERSION=${LAYA_C_VERSION:-1.0.15}
 for variant in ${VARIANTS:-avx2 compat}; do
   cxxflags="-DU_STATIC_IMPLEMENTATION"
   case $variant in
@@ -57,6 +58,14 @@ for variant in ${VARIANTS:-avx2 compat}; do
             isa=(-DLAYA_VULKAN=ON -DVulkan_INCLUDE_DIR="${VULKAN_HEADERS:?set VULKAN_HEADERS}"
                  -DVulkan_LIBRARY="$WORK/vk-mingw/libvulkan-1-delay.a" -DVulkan_GLSLC_EXECUTABLE="${GLSLC:-glslc}"
                  -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON) ;;
+    vulkan-compat) # the same two backends on the SSE4.2 baseline: for x64 programs under an
+            # emulator that offers no AVX (Rosetta, Windows on ARM) but passes Vulkan through
+            mkdir -p "$WORK/vk-mingw"
+            x86_64-w64-mingw32-dlltool -d "${VULKAN_DEF:?set VULKAN_DEF}" -y "$WORK/vk-mingw/libvulkan-1-delay.a" -D vulkan-1.dll
+            cxxflags="$cxxflags -I${SPIRV_HEADERS:?set SPIRV_HEADERS}"
+            isa=(-DLAYA_VULKAN=ON -DVulkan_INCLUDE_DIR="${VULKAN_HEADERS:?set VULKAN_HEADERS}"
+                 -DVulkan_LIBRARY="$WORK/vk-mingw/libvulkan-1-delay.a" -DVulkan_GLSLC_EXECUTABLE="${GLSLC:-glslc}"
+                 -DGGML_SSE42=ON -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF) ;;
     *) echo "unknown variant $variant" >&2; exit 1 ;;
   esac
   B=$ROOT/build-win-$variant
@@ -67,7 +76,7 @@ for variant in ${VARIANTS:-avx2 compat}; do
     -DICU_ROOT="$I" -DICU_INCLUDE_DIR="$I/include" -DICU_UC_LIBRARY_RELEASE="$I/lib/libsicuuc.a" \
     -DICU_I18N_LIBRARY_RELEASE="$I/lib/libsicuin.a" -DICU_DATA_LIBRARY_RELEASE="$I/lib/libsicudt.a" \
     "-DCMAKE_CXX_FLAGS=$cxxflags" -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-bench laya-diag laya-probe laya-cli
+  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-bench laya-diag laya-probe laya-cli
   x86_64-w64-mingw32-strip --strip-unneeded "$B/bin/laya.dll"
   # Import library for Visual C++ users (MinGW can link the DLL directly). llvm-dlltool writes
   # the short import format link.exe expects; GNU dlltool's output also works with it.

@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=${WORK:-$ROOT/build-deps}
 JOBS=${JOBS:-$(nproc)}
-VERSION=${LAYA_C_VERSION:-1.0.14}
+VERSION=${LAYA_C_VERSION:-1.0.15}
 ICU_VERSION=${ICU_VERSION:-76-1}
 ICU_TGZ=icu4c-${ICU_VERSION/-/_}-src.tgz
 if [ -z "${ZIG:-}" ]; then
@@ -77,7 +77,7 @@ for variant in $VARIANTS; do
     -DICU_ROOT="$I" -DICU_INCLUDE_DIR="$I/include" -DICU_UC_LIBRARY_RELEASE="$I/lib/libicuuc.a" \
     -DICU_I18N_LIBRARY_RELEASE="$I/lib/libicui18n.a" -DICU_DATA_LIBRARY_RELEASE="$I/lib/libicudata.a" \
     -Dnlohmann_json_DIR="$WORK/nl/share/cmake/nlohmann_json"
-  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi laya-bench laya-diag laya-trace laya-probe
+  cmake --build "$B" --parallel "$JOBS" --target laya_c test-capi test-sources laya-bench laya-diag laya-trace laya-probe
 
   # zig's Mach-O linker ignores -exported_symbols_list, so relink the dylib with LLVM's ld64.lld
   # against the same libc++/compiler-rt that zig uses (found by letting zig link a probe).

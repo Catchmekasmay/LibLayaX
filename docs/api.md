@@ -1,7 +1,7 @@
 # The API
 
-The whole interface is ten C functions, declared in `laya_c.h` (94 lines; in the source tree
-it is `laya.cpp/capi/laya_c.h`, and every binary package has a copy). This is API version 1.
+The whole interface is eleven C functions, declared in `laya_c.h` (in the source tree it is
+`laya.cpp/capi/laya_c.h`, and every binary package has a copy). This is API version 1.
 
 | Function | Purpose |
 |---|---|
@@ -13,7 +13,10 @@ it is `laya.cpp/capi/laya_c.h`, and every binary package has a copy). This is AP
 | [`laya_destroy`](#laya_destroy) | Unload a model. |
 | [`laya_last_error`](#laya_last_error) | The reason for the last failure on this thread. |
 | [`laya_set_log_callback`](#laya_set_log_callback) | Receive the library's log messages. |
+| [`laya_set_codec`](#laya_set_codec) | Decode the stored weights with a function of your own while a model loads. |
 | [`laya_version`](#laya_version-and-laya_api_version), [`laya_api_version`](#laya_version-and-laya_api_version) | Identify the library. |
+
+`laya_set_codec` is new in 1.0.15; libraries before that have the other ten.
 
 ## Rules that apply to every function
 
@@ -45,7 +48,7 @@ Loads a model and returns a handle to it, called an agent.
 
 | Argument | Meaning |
 |---|---|
-| `model_dir_utf8` | The model folder: the one that contains `rl_agent_config.json`. With the `variant` option it can also be the folder above the variants. |
+| `model_dir_utf8` | The model folder: the one that contains `rl_agent_config.json`. With the `variant` option it can also be the folder above the variants. From 1.0.15 it can also be the path of an uncompressed `.tar` file that holds the model; see [Model files](model-files.md). |
 | `options_json` | A JSON object with settings, or `NULL` or `""` for the defaults (CPU, full precision, all cores). See [Options](options.md). |
 
 **Returns** the agent, or `NULL` when the model could not be loaded. After a `NULL`, call
@@ -64,9 +67,10 @@ Typical reasons for `NULL`:
 |---|---|
 | `model_dir is empty` | `NULL` or empty path. |
 | `Cannot open …/rl_agent_config.json` | The folder is not a model folder. |
+| `… is not a folder and not an uncompressed tar archive` | The path names a file that is not a `.tar` archive of a model. |
 | `Unknown option: …` | A key in `options_json` that the library does not know. Typing mistakes are reported, not ignored. |
 | `This build has no Vulkan backend` | A GPU was requested from a CPU-only library. |
-| `This laya build needs CPU instructions your processor … does not provide: …` | An `avx2` library on a processor without AVX2. Use the `compat-sse42` one. |
+| `This laya build needs CPU instructions your processor … does not provide: …` | An `avx2` or `vulkan` library on a processor without AVX2, or under an emulator. Use the `compat-sse42` one. |
 
 The full list is in [Troubleshooting](troubleshooting.md).
 
@@ -198,6 +202,34 @@ The setting applies to the whole process, not to one agent. Call it before `laya
 Your function may be called from the engine's worker threads, so it must be safe to call from
 any thread, and it should return quickly.
 
+## laya_set_codec
+
+```c
+typedef int (*laya_codec_fn)(void* user, const char* path_utf8, const char* file_name_utf8,
+                             uint64_t offset, void* data, uint64_t size);
+void laya_set_codec(laya_codec_fn fn, void* user);
+```
+
+Gives the library a codec: a function of yours that decodes the stored bytes of the weight
+file, `model.safetensors`, while a model loads. With one, the weight file on disk can be kept in
+another form than the plain one. Without one, which is the normal case, nothing changes.
+
+| Argument | Meaning |
+|---|---|
+| `fn` | Your function. `NULL` removes the codec. |
+| `user` | Any pointer; it is handed back to `fn` unchanged. |
+
+The setting applies to the whole process and to every `laya_create` that follows. The function
+is called only while a model loads, on the thread that calls `laya_create`: about 200 times for
+the English model, each time with a block of the stored file that it replaces, in place, with
+the same block of the plain file. It returns 0, or another number to stop the load.
+
+[Model files](model-files.md#a-codec-for-the-weights) describes the arguments of the function
+and the rules it has to follow.
+
+New in 1.0.15. A program that must also run with older libraries looks the function up at run
+time and does not link it ([Older libraries](model-files.md#older-libraries)).
+
 ## laya_version and laya_api_version
 
 ```c
@@ -205,11 +237,12 @@ const char* laya_version(void);
 int laya_api_version(void);
 ```
 
-`laya_version` returns a line such as `laya_c 1.0.14 (api 1; backends: cpu,vulkan)`: the
+`laya_version` returns a line such as `laya_c 1.0.15 (api 1; backends: cpu,vulkan)`: the
 library version, the API version, and the backends compiled into this particular file. It is
 the quickest way to find out which library a program actually loaded.
 
 `laya_api_version` returns the API version as a number, 1 for everything described here.
+`laya_set_codec` was added without changing that number, because nothing that existed changed.
 A binding can compare it with the version it was written for (`LAYA_C_API_VERSION` in the
 header) and refuse to continue when they differ.
 

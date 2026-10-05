@@ -1,7 +1,7 @@
 # Flat C ABI shared library over laya.cpp: laya.dll (Windows), liblaya.so (Linux), liblaya.dylib (macOS).
 # Enable from the top level with -DLAYA_C_API=ON. Build ggml statically (-DBUILD_SHARED_LIBS=OFF)
 # to get a single self-contained library.
-set(LAYA_C_VERSION "1.0.14" CACHE STRING "Version string reported by laya_version()")
+set(LAYA_C_VERSION "1.0.15" CACHE STRING "Version string reported by laya_version()")
 
 add_library(laya_c SHARED laya_c.cpp)
 target_include_directories(laya_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -77,6 +77,13 @@ if(BUILD_TESTING)
     set_target_properties(laya-bench PROPERTIES BUILD_RPATH "@executable_path")
   endif()
   # Stand-alone check of the C++ runtime features the library relies on (no laya.dll, no model).
+  # .tar models and weight codecs (see tests/capi/test_sources.c)
+  add_executable(test-sources ${CMAKE_SOURCE_DIR}/tests/capi/test_sources.c)
+  set_target_properties(test-sources PROPERTIES C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  target_link_libraries(test-sources PRIVATE laya_c)
+  if(LAYA_MINGW_GCC)
+    target_link_options(test-sources PRIVATE -static)
+  endif()
   add_executable(laya-probe ${CMAKE_SOURCE_DIR}/tests/capi/probe.cpp)
   set_target_properties(laya-probe PROPERTIES CXX_STANDARD 20 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   if(LAYA_MINGW_GCC)
